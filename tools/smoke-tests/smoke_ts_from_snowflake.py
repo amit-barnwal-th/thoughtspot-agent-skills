@@ -13,13 +13,22 @@ Verifies the full path:
   8. Import the model TML to ThoughtSpot
   9. Verify the model appears in metadata search
  10. Count columns vs expected
- 11. Cleanup: delete imported model (unless --no-cleanup)
+ 11. [--mode-c] Export TML and re-import with --no-create-new; verify GUID unchanged
+ 12. Cleanup: delete imported model (unless --no-cleanup)
+
+Mode C (--mode-c) specifically tests that `ts tml import --no-create-new` updates
+an existing model in-place rather than creating a new one. It exports the just-created
+model's TML, adds `guid:` at the document root, and re-imports with --no-create-new.
+After the import it verifies:
+  - exactly one model with the smoke-test name exists (no duplicate created)
+  - the model's GUID is unchanged (not a new object)
 
 Usage:
     python tools/smoke-tests/smoke_ts_from_snowflake.py \\
         --ts-profile production \\
         --sf-profile production \\
         --sv-fqn "BIRD.SUPERHERO_SV.BIRD_SUPERHEROS_SV" \\
+        [--mode-c] \\
         [--no-cleanup]
 
 Notes:
@@ -34,7 +43,6 @@ import argparse
 import json
 import re
 import sys
-import tempfile
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -68,17 +76,21 @@ def _parse_sv_name(ddl: str) -> str:
 def _count_sv_tables(ddl: str) -> int:
     """Count table entries in the SV DDL's TABLES(...) block.
 
-    The DDL uses 'TABLES' (plural) as the section keyword — 'TABLE' (singular)
-    does NOT appear as a standalone keyword in the Semantic View DDL format.
-    Each entry in the TABLES block has the form 'alias AS DB.SCHEMA.TABLE_NAME'.
+    Two DDL formats are in the wild:
+      - Aliased:    alias AS DB.SCHEMA.TABLE_NAME [primary key (...)]
+      - Bare FQN:   DB.SCHEMA.TABLE_NAME [primary key (...)]
+    Count AS keywords for the aliased form; fall back to counting FQN patterns.
     """
     tables_block = re.search(r'\bTABLES\s*\((.*?)\)', ddl, re.IGNORECASE | re.DOTALL)
     if not tables_block:
         return 0
     block = tables_block.group(1)
-    # Count 'AS' keywords — one per table entry (alias AS FQN)
     as_count = len(re.findall(r'\bAS\b', block, re.IGNORECASE))
-    return max(as_count, 1) if block.strip() else 0
+    if as_count:
+        return as_count
+    # Bare FQN format: count distinct DB.SCHEMA.TABLE entries
+    fqn_count = len(re.findall(r'\b\w+\.\w+\.\w+', block))
+    return fqn_count if fqn_count else (1 if block.strip() else 0)
 
 
 # ---------------------------------------------------------------------------
@@ -94,62 +106,122 @@ def _search_ts_tables(ts_profile: str, table_name: str) -> list[dict]:
     )
 
 
-def _build_minimal_model_tml(model_name: str, table_guids: list[tuple[str, str]]) -> dict:
+def _get_table_first_column(ts_profile: str, table_guid: str) -> dict | None:
+    """Export a table's TML and return its first column definition (for model building).
+
+    Uses --parse so the CLI returns structured JSON ({type, guid, tml, info}) rather than
+    the raw API response ({edoc: '<yaml string>', info: {...}}).
+    """
+    try:
+        result = run_ts(["tml", "export", table_guid, "--parse"], ts_profile)
+        items = result if isinstance(result, list) else [result]
+        for item in items:
+            cols = item.get("tml", {}).get("table", {}).get("columns", [])
+            if cols:
+                return cols[0]
+    except Exception:
+        pass
+    return None
+
+
+def _build_minimal_model_tml(
+    model_name: str,
+    table_guids: list[tuple[str, str]],
+    first_col: dict | None = None,
+) -> dict:
     """
     Build the simplest valid Model TML that can be imported.
     table_guids: list of (table_name, guid)
 
     Per ThoughtSpot TML rules: `id` must equal `name` exactly (ThoughtSpot resolves
     join references against `id`). The GUID goes in `fqn`, not `id`.
+    ThoughtSpot also requires at least one column — use `first_col` from the table TML.
     """
+    table_name, _ = table_guids[0]
     model_tables = [
         {"name": name, "id": name, "fqn": guid}
         for name, guid in table_guids
     ]
+    columns = []
+    if first_col:
+        col_name = first_col.get("name", "smoke_col")
+        columns = [
+            {
+                "name": col_name,
+                "column_id": f"{table_name}::{col_name}",
+                "properties": {"column_type": first_col.get("properties", {}).get("column_type", "ATTRIBUTE")},
+            }
+        ]
     return {
         "model": {
             "name": model_name,
             "model_tables": model_tables,
-            "columns": [],
+            "columns": columns,
         }
     }
+
+
+def _ts_import_stdin(ts_profile: str, tml_str: str, extra_flags: list[str]) -> list | dict:
+    """
+    Import a TML string via `ts tml import` using stdin (JSON array of TML strings).
+    `ts tml import` reads from stdin — there is no --file flag.
+    """
+    import subprocess as _sp
+    cmd = ["ts", "tml", "import", "--profile", ts_profile] + extra_flags
+    result = _sp.run(cmd, input=json.dumps([tml_str]), capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ts tml import failed:\n{result.stderr.strip() or result.stdout.strip()}"
+        )
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"ts tml import returned non-JSON:\n{result.stdout[:300]}"
+        ) from e
+
+
+def _extract_guid(result: list | dict) -> str | None:
+    """Extract a created/updated GUID from a ts tml import response."""
+    items = result if isinstance(result, list) else [result]
+    for item in items:
+        g = (
+            item.get("response", {}).get("header", {}).get("id_guid")
+            or item.get("id_guid")
+            or item.get("metadata_id")
+        )
+        if g:
+            return g
+    return None
 
 
 def _import_model_tml(ts_profile: str, tml_data: dict) -> str:
     """Import a model TML and return the created GUID."""
     tml_str = yaml.dump(tml_data, default_flow_style=False, allow_unicode=True)
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".yaml", delete=False, prefix="smoke_model_"
-    ) as f:
-        f.write(tml_str)
-        tmp_path = f.name
-
-    result = run_ts(
-        ["tml", "import", "--file", tmp_path, "--policy", "ALL_OR_NONE"],
-        ts_profile,
-    )
-    Path(tmp_path).unlink(missing_ok=True)
-
-    # Parse GUID from result
-    if isinstance(result, list):
-        for item in result:
-            g = item.get("response", {}).get("header", {}).get("id_guid") or \
-                item.get("id_guid") or item.get("metadata_id")
-            if g:
-                return g
-    elif isinstance(result, dict):
-        g = result.get("id_guid") or result.get("metadata_id")
-        if g:
-            return g
-
-    raise RuntimeError(
-        f"Could not extract GUID from import response: {json.dumps(result)[:300]}"
-    )
+    result = _ts_import_stdin(ts_profile, tml_str, ["--policy", "ALL_OR_NONE"])
+    guid = _extract_guid(result)
+    if not guid:
+        raise RuntimeError(
+            f"Could not extract GUID from import response: {json.dumps(result)[:300]}"
+        )
+    return guid
 
 
 def _delete_ts_object(ts_profile: str, guid: str) -> None:
     """Delete a ThoughtSpot metadata object by GUID."""
     run_ts(["metadata", "delete", guid], ts_profile)
+
+
+def _import_model_tml_update(ts_profile: str, tml_dict: dict, model_guid: str) -> list | dict:
+    """
+    Import a model TML update in-place using --no-create-new.
+
+    Per TML invariants: guid: must be at the document root, not nested inside model:.
+    --no-create-new fails if the GUID is not found, preventing silent duplicate creation.
+    """
+    tml_with_guid = {**tml_dict, "guid": model_guid}
+    tml_str = yaml.dump(tml_with_guid, default_flow_style=False, allow_unicode=True)
+    return _ts_import_stdin(ts_profile, tml_str, ["--no-create-new"])
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +247,14 @@ def main() -> int:
     parser.add_argument(
         "--no-cleanup", action="store_true",
         help="Keep the imported ThoughtSpot model after the test.",
+    )
+    parser.add_argument(
+        "--mode-c", action="store_true",
+        help=(
+            "Also test the Mode C (update existing) path: export the created model's TML, "
+            "re-import with --no-create-new, and verify the GUID is unchanged "
+            "(no duplicate model created)."
+        ),
     )
     args = parser.parse_args()
 
@@ -247,14 +327,18 @@ def main() -> int:
         return r.summary()
 
     # ── Find ThoughtSpot table objects for the first table in the SV ─────────
-    # Extract table names from the TABLES block.
-    # Real DDL format: TABLES ( alias AS DB.SCHEMA.PHYSICAL_TABLE [primary key (...)] )
-    # We extract alias names (the left-hand side before AS).
+    # Two DDL formats exist:
+    #   Aliased:   alias AS DB.SCHEMA.PHYSICAL_TABLE [primary key (...)]
+    #              → search TS by alias name (matches how TS names its table objects)
+    #   Bare FQN:  DB.SCHEMA.PHYSICAL_TABLE [primary key (...)]
+    #              → search TS by the physical table name (last FQN component)
     tables_block_m = re.search(r'\bTABLES\s*\((.*?)\)', ddl, re.IGNORECASE | re.DOTALL)
     if tables_block_m:
-        ts_table_names = re.findall(
-            r'(\w+)\s+AS\s+\w+\.\w+\.\w+', tables_block_m.group(1), re.IGNORECASE
-        )
+        block = tables_block_m.group(1)
+        ts_table_names = re.findall(r'(\w+)\s+AS\s+\w+\.\w+\.\w+', block, re.IGNORECASE)
+        if not ts_table_names:
+            # Bare FQN format — extract physical table name (last component of FQN)
+            ts_table_names = re.findall(r'\w+\.\w+\.(\w+)', block)
     else:
         ts_table_names = []
 
@@ -286,7 +370,13 @@ def main() -> int:
     imported_guid: str | None = None
 
     if found_tables:
-        model_tml = _build_minimal_model_tml(smoke_model_name, found_tables)
+        # Use only the first table — a single-table model needs no join definitions.
+        # Fetch one real column from the table so TS accepts the model (empty columns rejected).
+        first_table_name, first_table_guid = found_tables[0]
+        first_col = _get_table_first_column(args.ts_profile, first_table_guid)
+        if first_col:
+            r.info(f"Using column '{first_col.get('name')}' from {first_table_name} for minimal model")
+        model_tml = _build_minimal_model_tml(smoke_model_name, found_tables[:1], first_col)
 
         def _validate_model():
             errors = validate_model_tml(model_tml)
@@ -335,6 +425,76 @@ def main() -> int:
         if ok and model_meta:
             base_url = run_ts(["auth", "whoami"], args.ts_profile).get("base_url", "")
             r.info(f"Model URL: {base_url}/#/model/{imported_guid}")
+
+    # ── Mode C: --no-create-new in-place update ───────────────────────────────
+    if args.mode_c and imported_guid:
+        print()
+        print("  -- Mode C: in-place update (--no-create-new) --")
+
+        def _export_for_update():
+            # --parse returns [{type, guid, tml, info}] with the parsed TML under "tml"
+            result = run_ts(["tml", "export", imported_guid, "--fqn", "--parse"], args.ts_profile)
+            items = result if isinstance(result, list) else [result]
+            model_obj = next(
+                (item["tml"] for item in items
+                 if isinstance(item, dict) and item.get("type") == "model"),
+                None,
+            )
+            if model_obj is None:
+                raise RuntimeError(
+                    f"No model TML found in export result for GUID {imported_guid}. "
+                    f"Export returned {type(result).__name__} with "
+                    f"{len(items)} item(s). Types: {[i.get('type') for i in items]}"
+                )
+            return model_obj
+
+        ok, original_model_tml = r.step(
+            f"Mode C: Export '{smoke_model_name}' TML for update", _export_for_update
+        )
+
+        if ok and original_model_tml is not None:
+            def _update_in_place():
+                return _import_model_tml_update(
+                    args.ts_profile, original_model_tml, imported_guid
+                )
+
+            ok, _ = r.step(
+                f"Mode C: Re-import with --no-create-new (guid: {imported_guid})",
+                _update_in_place,
+            )
+
+            if ok:
+                def _verify_no_duplicate():
+                    results = run_ts(
+                        ["metadata", "search", "--subtype", "WORKSHEET",
+                         "--name", f"%{smoke_model_name}%"],
+                        args.ts_profile,
+                    )
+                    exact = [
+                        r_ for r_ in results
+                        if r_.get("metadata_name") == smoke_model_name
+                    ]
+                    if len(exact) > 1:
+                        raise RuntimeError(
+                            f"--no-create-new created a duplicate: found {len(exact)} models "
+                            f"named '{smoke_model_name}'. The flag may have been silently ignored."
+                        )
+                    if len(exact) == 0:
+                        raise RuntimeError(
+                            f"No model named '{smoke_model_name}' found after update — "
+                            "the --no-create-new import may have deleted the model."
+                        )
+                    found_guid = exact[0].get("metadata_id") or exact[0].get("id")
+                    if found_guid != imported_guid:
+                        raise RuntimeError(
+                            f"GUID changed after --no-create-new: expected {imported_guid}, "
+                            f"got {found_guid}. A new model was created instead of updating in-place."
+                        )
+
+                r.step(
+                    "Mode C: Verify GUID unchanged — no duplicate created",
+                    _verify_no_duplicate,
+                )
 
     # ── Cleanup ───────────────────────────────────────────────────────────────
     if imported_guid:
