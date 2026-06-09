@@ -46,7 +46,17 @@ On skill invocation, display this plan before doing any work:
 **ts-convert-from-tableau** — convert a Tableau workbook into ThoughtSpot TML objects,
 with optional dashboard-to-liveboard migration.
 
-### Steps
+### Modes
+
+  **A  Audit** — analyse a TWB file (or multiple files) and report migration coverage.
+     No ThoughtSpot auth required. No TMLs generated. Use this to assess feasibility
+     before committing to a migration.
+
+  **M  Migrate** — full conversion: parse, generate TMLs, validate, and import.
+
+Enter A / M:
+
+### Steps (Migrate mode)
 
   1.  Authenticate to ThoughtSpot .......................... auto
   2.  Locate and extract the TWB file ...................... you provide path
@@ -65,9 +75,189 @@ with optional dashboard-to-liveboard migration.
 Confirmation required: Steps 7, 8, 11
 Auto-executed: Steps 1, 3, 5, 6, 9, 10, 12
 
+### Steps (Audit mode)
+
+  A1.  Locate and extract TWB file(s) ...................... you provide path(s)
+  A2.  Parse TWB XML — same extraction as Step 3 .......... auto
+  A3.  Classify formulas into translation tiers ............ auto
+  A4.  Migration coverage report ........................... auto
+
+No auth, no TML generation, no import. Supports multiple files in one run.
+
 ---
 
-Ask: "Ready to start? Please provide the path to your `.twb` or `.twbx` file."
+If Audit mode, proceed to Step A1. If Migrate mode, proceed to Step 1.
+
+---
+
+## Step A1 — Locate TWB File(s) (Audit Mode)
+
+Ask: "Provide the path to a `.twb` or `.twbx` file, or a directory containing multiple
+workbooks."
+
+If a directory is provided, find all `.twb` and `.twbx` files recursively. For each
+`.twbx`, extract to a temp directory to access the inner `.twb`.
+
+Save the list of TWB paths. Process each file through Steps A2–A4 independently.
+
+---
+
+## Step A2 — Parse TWB XML (Audit Mode)
+
+Run the same extraction as Step 3 (3a through 3d) on each TWB file. Do NOT skip any
+datasource type — include Extract datasources in the audit count (marked as "Extract —
+skipped in migration").
+
+---
+
+## Step A3 — Classify Formulas (Audit Mode)
+
+For each calculated field extracted in Step A2, classify it into one of these tiers
+based on the patterns in `tableau-formula-translation.md`:
+
+| Tier | Description | Examples |
+|---|---|---|
+| **Native** | Direct ThoughtSpot function mapping exists | IF/THEN, IFNULL, DATEDIFF, LEFT, ABS, ROUND, IIF |
+| **LOD** | LOD expression → `group_aggregate()` | `{FIXED dim : SUM(col)}` |
+| **Cumulative** | Running calculation → `cumulative_*()` | RUNNING_SUM, RUNNING_AVG |
+| **Moving** | Window table calc → `moving_*()` | WINDOW_SUM, WINDOW_AVG (when sort attr determinable) |
+| **Pass-through** | Valid SQL but no native function → `sql_*_aggregate_op()` | Partitioned RANK, DENSE_RANK, WINDOW_* without sort context, TOTAL() |
+| **Untranslatable** | No ThoughtSpot equivalent — will be omitted | LOOKUP, INDEX, SIZE(), PREVIOUS_VALUE |
+| **Parameter ref (auto)** | References a Tableau parameter with static list/range — parameter auto-created in model | `[Parameters].[Currency]` where Currency has `<member>` values |
+| **Parameter ref (query)** | References a Tableau parameter with SQL-lookup list — queryable at migration time | SQL-populated parameter lists (needs connection) |
+
+### Classifier implementation notes
+
+**Function detection — require parentheses.** Match `FUNCTION_NAME(` (with optional
+whitespace before the paren), not bare word boundaries. Bare `\bSIZE\b` false-positives
+on dimension values like `'Size'` or column names like `[Size]`. Correct patterns:
+
+```
+LOOKUP\s*\(   INDEX\s*\(   SIZE\s*\(   PREVIOUS_VALUE\s*\(   RAWSQL_
+RUNNING_(SUM|AVG|MAX|MIN|COUNT)\s*\(
+WINDOW_(SUM|AVG|MAX|MIN|COUNT|STDEV|VAR|MEDIAN|PERCENTILE)\s*\(
+RANK(_UNIQUE|_MODIFIED|_DENSE|_PERCENTILE)?\s*\(
+TOTAL\s*\(
+```
+
+**Parameter references.** Detect `[Parameters].[...]` pattern — this is Tableau's
+cross-datasource parameter reference syntax. These formulas use translatable syntax
+(IF/CASE/WHEN). Cross-reference the parameter name against the parameter definitions
+extracted in Step A2/3:
+- If the parameter has static `<member>` list values or a `<range>` → **Parameter ref
+  (auto)** — the parameter will be auto-created in the model TML, formula translates
+  with a simple `[Parameters].[Name]` → `[Name]` prefix strip
+- If the parameter has no static values (SQL-lookup populated) → **Parameter ref
+  (query)** — auto-migratable at migration time (requires warehouse connection to
+  populate list values), but flagged separately in audit mode since no connection
+  is available
+
+**LOD first.** Check `{FIXED|INCLUDE|EXCLUDE}` before other tiers — LOD expressions
+may also contain functions like SUM that would match Native.
+
+For each formula, also check:
+- Does it reference other calculated fields? (cross-reference depth)
+- Does it use functions from the untranslatable list?
+- Does it mix translatable and untranslatable patterns?
+
+---
+
+## Step A4 — Migration Coverage Report (Audit Mode)
+
+For each TWB file, produce a coverage report. If multiple files were audited, also
+produce a combined summary at the end.
+
+**Per-file report:**
+
+```
+Audit: {workbook_name}
+══════════════════════════════════════════════════════
+
+  Datasources:          {N} total
+    Live:               {N}
+    Extract:            {N} (skipped in migration)
+    Published (sqlproxy): {N}
+
+  Physical tables:      {N}
+  Custom SQL relations: {N} → will generate sql_view TMLs
+  Joins:                {N}
+
+  Calculated fields:    {N} total
+  ┌──────────────────────────────────────────────────────┐
+  │ Tier                    Count    %     Examples      │
+  ├──────────────────────────────────────────────────────┤
+  │ Native                  {N}     {%}   IF, DATEDIFF  │
+  │ LOD → group_agg         {N}     {%}   {FIXED ...}   │
+  │ Cumulative              {N}     {%}   RUNNING_SUM   │
+  │ Moving                  {N}     {%}   WINDOW_SUM    │
+  │ Pass-through            {N}     {%}   DENSE_RANK    │
+  │ Parameter ref (auto)    {N}     {%}   static list   │
+  │ Parameter ref (query)   {N}     {%}   SQL lookup    │
+  │ Untranslatable          {N}     {%}   LOOKUP        │
+  └──────────────────────────────────────────────────────┘
+
+  Parameters:           {N} total ({N} static, {N} SQL-lookup — query at migration)
+  Dashboards:           {N} (optional liveboard migration)
+
+  ──────────────────────────────────────────────────
+  Migration coverage:   {(all except untranslatable) / total}%
+                         (all parameters auto-created — static or queried)
+  Untranslatable:       {N} formula(s) — will be omitted
+  SQL-lookup params:    {N} — need warehouse connection at migration time
+  Pass-through formulas require SQL Passthrough Functions enabled.
+  ──────────────────────────────────────────────────
+```
+
+**Migration coverage** includes everything except Untranslatable. All parameter types
+are auto-migratable: static params are created directly in the model TML; SQL-lookup
+params are populated by querying the warehouse at migration time. The formula reference
+`[Parameters].[Name]` is rewritten to `[Name]` in both cases.
+
+If any formulas are classified as Untranslatable, list them:
+
+```
+  Untranslatable formulas (will be omitted):
+    - {formula_name}: {reason} — {expression excerpt}
+    - ...
+```
+
+If any SQL-lookup parameters exist, note them:
+
+```
+  SQL-lookup parameters ({count} — populated from warehouse at migration time):
+    - {param_name}: query/column reference from TWB
+    - ...
+  Values are a point-in-time snapshot. Consider /ts-recipe-parameter-sync for
+  ongoing refresh.
+```
+
+If any formulas are classified as Pass-through, list them with the generated expression:
+
+```
+  Pass-through formulas (require SQL Passthrough Functions enabled):
+    - {formula_name}: sql_{type}_aggregate_op("...", ...)
+    - ...
+```
+
+Write the report to `/tmp/ts_tableau_mig/audit/{workbook_name}_audit.md` and display
+it inline.
+
+**Combined summary (multiple files):**
+
+```
+Audit Summary: {N} workbook(s)
+══════════════════════════════════════════════════════
+
+  Workbook                          Tables  Calcs  Coverage
+  ─────────────────────────────────────────────────────────
+  {workbook_1}                      {N}     {N}    {%}%
+  {workbook_2}                      {N}     {N}    {%}%
+  ...
+  ─────────────────────────────────────────────────────────
+  Total                             {N}     {N}    {%}%
+```
+
+After the audit, exit cleanly. Do NOT proceed to Migrate mode steps.
 
 ---
 
@@ -177,9 +367,18 @@ For each datasource, extract:
   not by display name — resolve these references before translating formulas.
 
 **Parameters** — `<datasource name="Parameters">` children:
-- `name`, `caption`, `datatype`, default value
-- Log parameters for the limitations report — ThoughtSpot has its own parameter system
-  and Tableau parameters cannot be auto-migrated
+- For each `<column>` with `param-domain-type` attribute:
+  - `caption` = display name (used as ThoughtSpot parameter name)
+  - `datatype` = `string` | `integer` | `real` | `date` | `boolean`
+  - `param-domain-type` = `list` | `range` | `any`
+  - `value` attribute or `calculation.formula` = default value
+  - `<member value="...">` children = list values (when `param-domain-type="list"`)
+  - `<range min="..." max="...">` child = range bounds (when `param-domain-type="range"`)
+- Save parameter definitions — these generate `model.parameters[]` in Step 5b
+- **SQL-lookup parameters** (where the list values come from a database query rather
+  than static `<member>` elements): save the query/column reference — at migration
+  time (Step 5b), query the warehouse to populate `list_config.list_choice[]` with
+  current values. In audit mode (no connection), flag as "requires connection"
 
 Save the parsed structure internally. Announce a summary:
 > Parsed `{workbook_name}`: {N} datasource(s), {N} physical table(s),
@@ -309,6 +508,15 @@ model:
       type: LEFT_OUTER          # INNER | LEFT_OUTER | RIGHT_OUTER | OUTER
       cardinality: ONE_TO_MANY
   - name: OTHER_TABLE
+  parameters:                   # omit if no Tableau parameters to migrate
+  - name: Currency
+    data_type: VARCHAR
+    default_value: "USD"
+    list_config:
+      list_choice:
+      - value: USD
+      - value: CAD
+      - value: GBP
   formulas:                     # omit section entirely if no translatable calculated fields
   - id: formula_Formula Name
     name: Formula Name
@@ -319,6 +527,56 @@ model:
     properties:
       column_type: ATTRIBUTE    # or MEASURE
 ```
+
+### Parameter migration (Tableau → ThoughtSpot `parameters[]`)
+
+When the TWB has a `Parameters` datasource (Step 3), generate `parameters[]` entries
+in the model TML. Omit `id` — ThoughtSpot assigns it on import.
+
+**Type mapping:**
+
+| Tableau `param-domain-type` | Tableau `datatype` | ThoughtSpot `data_type` | Config |
+|---|---|---|---|
+| `list` | `string` | `VARCHAR` | `list_config` with `list_choice[]` from `<member>` values |
+| `list` | `date` | `DATE` | `list_config` with date values (strip `#` delimiters) |
+| `list` | `integer` | `INT64` | `list_config` |
+| `list` | `real` | `DOUBLE` | `list_config` |
+| `range` | `integer` | `INT64` | `range_config` with `range_min`, `range_max` |
+| `range` | `real` | `DOUBLE` | `range_config` |
+| `range` | `date` | `DATE` | Free-form (no `range_config` — ThoughtSpot range is numeric only) |
+| `any` | any | mapped type | Free-form (no config) |
+| `list` | `boolean` | `BOOL` | `list_config` with `'true'`/`'false'` values |
+
+**Value cleanup:**
+- Tableau wraps string member values in double quotes: `'"USD"'` → strip to `USD`
+- Tableau date defaults use `#` delimiters: `#2026-05-10#` → strip to `2026-05-10`
+  then format as `MM/DD/YYYY` (ThoughtSpot's date parameter format)
+
+**SQL-lookup parameters:** If a parameter's list values come from a database query
+(no static `<member>` elements in the TWB), query the warehouse at migration time to
+populate `list_config.list_choice[]`:
+1. Extract the SQL query or column reference from the Tableau parameter definition
+2. Execute against the warehouse connection from Step 4
+3. Use the distinct result values as `list_choice[]` entries
+4. Log in `MIGRATION_LIMITATIONS.md` that these values are a point-in-time snapshot
+
+If no warehouse connection is available (Step 4 was skipped), omit the parameter and
+log the omission with the original SQL query for manual recreation.
+
+### Formula reference translation
+
+In Tableau, calculated fields reference parameters as `[Parameters].[Parameter Name]`.
+In ThoughtSpot, parameters are referenced as `[Parameter Name]` (no prefix, no table
+qualifier). Apply this transformation:
+
+```
+Tableau:     [Parameters].[Currency]
+ThoughtSpot: [Currency]
+```
+
+This is a simple prefix strip: `[Parameters].[X]` → `[X]`. Apply AFTER resolving
+Tableau internal cross-references (`[Calculation_\d+]`) and BEFORE translating function
+syntax.
 
 Formula translation rules: use `tableau-formula-translation.md`.
 - Convert Tableau join types: `full` → `OUTER`, `left` → `LEFT_OUTER`,
