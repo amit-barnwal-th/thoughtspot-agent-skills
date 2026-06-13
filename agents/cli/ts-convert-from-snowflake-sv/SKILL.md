@@ -278,9 +278,12 @@ for col_name in sv_cols & model_cols:
         })
 
     if col_name in sv_formulas and ts_col["formula_id"]:
-        sv_expr = sv_formulas[col_name]
+        # IMPORTANT: translate the SV expression through the formula translation
+        # reference FIRST (Step 9 resolution), THEN compare TS-formula-to-TS-formula.
+        # Comparing raw SQL to TS formula text flags every column as modified.
+        sv_expr_translated = translate_sv_to_ts(sv_formulas[col_name])  # Step 9
         ts_expr = existing_formulas.get(ts_col["formula_id"], "")
-        if _exprs_differ(sv_expr, ts_expr):
+        if _exprs_differ(sv_expr_translated, ts_expr):
             change_set["modified_expressions"].append({
                 "column":  col_name,
                 "current": ts_expr,
@@ -459,13 +462,12 @@ Store the returned DDL string in full — it will be parsed in the next step.
 If the call fails with "object does not exist", verify the fully-qualified name and
 the user's role has `USAGE` on the schema.
 
-**Converting multiple views from the same schema?** Get all DDLs in one query:
+**Converting multiple views from the same schema?** List then fetch each DDL:
 ```sql
-SELECT view_name,
-       GET_DDL('SEMANTIC_VIEW', '{database}.{schema}.' || view_name) AS ddl
-FROM {database}.information_schema.views
-WHERE table_schema = '{schema}'
-  AND table_type = 'SEMANTIC VIEW';   -- Snowflake filter for semantic views only
+SHOW SEMANTIC VIEWS IN SCHEMA {database}.{schema};
+SELECT "name" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+-- then per name:
+SELECT GET_DDL('SEMANTIC_VIEW', '{database}.{schema}."' || name || '"') AS ddl;
 ```
 Parse each DDL in Step 4 before switching Snowflake queries.
 
@@ -497,8 +499,9 @@ will treat as if it came from one Semantic View.
   which definition wins or rename one before the merge can proceed. Do not silently
   prefer either definition.
 
-**4. Dimensions / time_dimensions / facts** — union across all tables, deduplicated
-by (table_name, column_name).
+**4. Dimensions / time_dimensions / metrics / facts (if present)** — union across all
+views, deduplicated by (table_name, column_name). DDL `facts ()` entries (row-level named
+expressions) are also merged and available for identifier resolution in Step 9.
 
 **5. Fact table identification in merged context** — re-run the fact-table detection
 algorithm (tables with no incoming relationships in the merged relationship set = fact
@@ -570,6 +573,24 @@ Build an internal map:
 - `columns` (flat): all dimensions and metrics, keyed by (table_alias, view_col), with
   display name, synonyms[], and description fields populated.
 - `model_description`: from the top-level `comment='...'` clause
+
+**4x. Unrecognized-construct scan (MANDATORY — do not skip).** After extracting the known
+blocks, scan the remaining DDL text for these tokens (case-insensitive). Each hit is a
+construct this skill cannot yet convert. NEVER silently drop one:
+
+| Token | Construct | Action |
+|---|---|---|
+| `facts (` | FACTS block (row-level expressions metrics may reference) | Extract names+exprs; treat each fact as a candidate formula source in Step 9 resolution; if a metric references an unresolvable fact → FAIL that column loudly with the fact name |
+| `ai_sql_generation` / `ai_question_categorization` | CA custom instructions | Add Unmapped Report row: "Custom instructions present — review for ThoughtSpot data_model_instructions equivalent (GAP-06)" |
+| `ai_verified_queries` | CA verified queries | Unmapped Report row (GAP-05); note count |
+| `with cortex search service` | dimension search service | Unmapped Report row naming the dimension |
+| `private` (as visibility modifier) | private dims/metrics | Convert but set `index_type: DONT_INDEX` + report |
+| `unique (` / `range between` | uniqueness constraints | Record for join cardinality inference (see Task 1.4) |
+| anything else unparsed (non-whitespace remains after extraction) | unknown grammar | STOP and show the user the unconsumed text — the SV spec evolves; do not guess |
+
+**Top-level COMMENT extraction fix:** the `comment '...'` clause is no longer guaranteed to
+be the last clause — `AI_*` clauses may follow it. Anchor on the `comment '...'` token
+pattern, not on position relative to the end of the DDL.
 
 ---
 
@@ -822,6 +843,14 @@ model:
       column_type: MEASURE
 ```
 
+**Join type and cardinality defaults:**
+
+SV relationships carry no join type — they define foreign key paths only. Use these defaults:
+- **`type: LEFT_OUTER`** — preserves fact rows with NULL FKs, matching SV query semantics
+  where unmatched facts still aggregate. State the assumption in the conversion report.
+- **`cardinality: MANY_TO_ONE`** — default for FK→PK relationships. If the target table's
+  key carries a `UNIQUE` constraint (detected in Step 4x scan), use `ONE_TO_ONE` instead.
+
 **Model TML skeleton (Scenario B / Hybrid — inline joins, or no pre-defined table joins):**
 
 Use this when ThoughtSpot Table objects have no `joins_with` entries, or when creating
@@ -838,8 +867,8 @@ model:
     - name: "{join_name}"
       with: TO_TABLE        # REQUIRED — must equal `id` (= `name`) of the target entry exactly
       on: "[FROM_TABLE::{fk_col}] = [TO_TABLE::{pk_col}]"  # uses id values (= name values)
-      type: INNER
-      cardinality: MANY_TO_ONE
+      type: LEFT_OUTER
+      cardinality: MANY_TO_ONE   # or ONE_TO_ONE if target key has UNIQUE constraint
   - id: TO_TABLE            # matches `with` value above — same case
     name: TO_TABLE
     fqn: "{to_guid}"
@@ -1293,6 +1322,7 @@ Model in one pass through Steps 4–13.
 
 | Version | Date | Summary |
 |---|---|---|
+| 1.8.0 | 2026-06-13 | Fail-loud parsing (C5): Step 4x scans for facts, AI clauses, cortex search, private, unknown grammar. LEFT_OUTER join default (F5). Fix SV discovery SQL (F8). Fix Mode C comparison to translate before diff (F7). |
 | 1.7.1 | 2026-06-13 | Add "never normalise API response names" rule (reverse-port from CoCo). |
 | 1.7.0 | 2026-06-12 | Adopt PT1 pass-through policy (scalar reliable; flag aggregate pass-through for review). |
 | 1.6.0 | 2026-06-12 | Add pre-import validation gate (I1/I2/I4/I5) before model TML import (BL-001). |

@@ -508,8 +508,8 @@ Key differences from Worksheet format:
 
 Query `INFORMATION_SCHEMA.COLUMNS` for all 8 tables. Key findings:
 
-1. **Case-sensitive column:** `DM_DATE_DIM.date` — lowercase in Snowflake → requires
-   quoting or wrapper view
+1. **Reserved-word column:** `DM_DATE_DIM.DATE` — SQL reserved word, requires quoting
+   in `expr` but bare in PK/FK
 2. **Physical column typo:** `DM_ORDER_DETAIL.RRDER_ID` — the TML references `ORDER_ID`
    but the actual Snowflake column is `RRDER_ID`
 3. **FK/PK name conflicts:** Multiple tables share the same join column names:
@@ -527,13 +527,13 @@ Query `INFORMATION_SCHEMA.COLUMNS` for all 8 tables. Key findings:
 
 ## Step 4 — Create Wrapper Views
 
-All three issues above require wrapper views in a new schema `DUNDERMIFFLIN.PUBLIC_SV`.
+All issues above require wrapper views in a new schema `DUNDERMIFFLIN.PUBLIC_SV`.
 
 **Why wrapper views are needed:**
-- Case-sensitive `date` column cannot be used bare in `primary_key.columns` or
-  `relationship_columns` (Cortex Analyst error 392700)
+- `DATE` is a SQL reserved word — requires quoting in `expr` fields
+- Physical column typo (`RRDER_ID`) needs renaming
 - FK columns sharing names with PK columns must be renamed to be globally unique
-- `DM_DATE_DIM` needs a single wrapper view with the case-sensitive column uppercased
+- `DM_DATE_DIM` needs a single shared wrapper view for cross-domain queries
 
 **Wrapper view DDL** (all batched in a single SQL call):
 
@@ -543,14 +543,14 @@ CREATE SCHEMA IF NOT EXISTS DUNDERMIFFLIN.PUBLIC_SV;
 CREATE OR REPLACE VIEW DUNDERMIFFLIN.PUBLIC_SV.DM_ORDER AS
 SELECT ORDER_ID, CUSTOMER_ID AS DM_ORDER_CUSTOMER_ID,
        EMPLOYEE_ID AS DM_ORDER_EMPLOYEE_ID,
-       ORDER_DATE AS DM_ORDER_ORDER_DATE,
+       ORDER_DATE,
        REQUIRED_DATE, SHIPPED_DATE, SHIPPER_ID, FREIGHT,
        SHIP_NAME, SHIP_ADDRESS, SHIP_CITY, SHIP_REGION,
        SHIP_POSTAL_CODE, SHIP_COUNTRY
 FROM DUNDERMIFFLIN.PUBLIC.DM_ORDER;
 
 CREATE OR REPLACE VIEW DUNDERMIFFLIN.PUBLIC_SV.DM_ORDER_DETAIL AS
-SELECT RRDER_ID AS DM_ORDER_DETAIL_ORDER_ID,
+SELECT RRDER_ID,
        PRODUCT_ID AS DM_ORDER_DETAIL_PRODUCT_ID,
        UNIT_PRICE, QUANTITY, DISCOUNT, LINE_TOTAL
 FROM DUNDERMIFFLIN.PUBLIC.DM_ORDER_DETAIL;
@@ -573,8 +573,9 @@ CREATE OR REPLACE VIEW DUNDERMIFFLIN.PUBLIC_SV.DM_CATEGORY AS
 SELECT * FROM DUNDERMIFFLIN.PUBLIC.DM_CATEGORY;
 
 -- Single shared date dim (joined from both DM_ORDER and DM_INVENTORY)
+-- Physical column is DATE (reserved word — requires quoting in expr but not in PK/FK)
 CREATE OR REPLACE VIEW DUNDERMIFFLIN.PUBLIC_SV.DM_DATE_DIM AS
-SELECT "date" AS DATE_VALUE FROM DUNDERMIFFLIN.PUBLIC.DM_DATE_DIM;
+SELECT "DATE" FROM DUNDERMIFFLIN.PUBLIC.DM_DATE_DIM;
 
 CREATE OR REPLACE VIEW DUNDERMIFFLIN.PUBLIC_SV.DM_INVENTORY AS
 SELECT BALANCE_DATE AS DM_INVENTORY_BALANCE_DATE,
@@ -585,8 +586,8 @@ FROM DUNDERMIFFLIN.PUBLIC.DM_INVENTORY;
 
 **Key decisions:**
 - FK columns renamed with table prefix: `CUSTOMER_ID` → `DM_ORDER_CUSTOMER_ID`
-- `DM_DATE_DIM` kept as a single shared view — case-sensitive `"date"` uppercased to `DATE_VALUE`
-- Typo `RRDER_ID` renamed to `DM_ORDER_DETAIL_ORDER_ID`
+- `DM_DATE_DIM` kept as a single shared view — column `DATE` is a reserved word (quoted in `expr`)
+- Typo `RRDER_ID` passed through as-is (no PK collision — `DM_ORDER` PK is `ORDER_ID`)
 
 ---
 
@@ -636,7 +637,7 @@ Translation:
 - The `{date_col}` (`DM_DATE_DIM::date`) identifies the non-additive dimension — this
   is the **joined** date dimension table, not the local FK column
 - Result: metric with `non_additive_dimensions` referencing the joined date dim's
-  time dimension (`dm_date_dim.date_value`)
+  time dimension (`dm_date_dim.date`)
 
 ✓ Translatable — use `non_additive_dimensions` referencing the joined date table.
 No `facts` section is needed as long as the metric name does not collide with the
@@ -648,13 +649,13 @@ metrics:
   expr: SUM(dm_inventory.FILLED_INVENTORY)
   non_additive_dimensions:
   - table: dm_date_dim
-    dimension: date_value
+    dimension: date
     sort_direction: ascending
     nulls_position: last
 ```
 
 **Important:** The `non_additive_dimensions` should reference the **joined date
-dimension table** (e.g. `dm_date_dim.date_value`), not a local FK column on the
+dimension table** (e.g. `dm_date_dim.date`), not a local FK column on the
 fact table. Use a **single shared date dimension** when multiple fact tables
 (e.g. orders and inventory) join to the same date table — this allows Cortex Analyst
 to answer cross-domain questions like "sales and inventory balance last quarter"
@@ -715,7 +716,7 @@ relationships:
   left_table: dm_order_detail
   right_table: dm_order
   relationship_columns:
-  - left_column: DM_ORDER_DETAIL_ORDER_ID    # renamed from RRDER_ID
+  - left_column: RRDER_ID                     # typo in source table — not renamed
     right_column: ORDER_ID
 - name: dm_order_detail_to_dm_product
   left_table: dm_order_detail
@@ -733,8 +734,8 @@ relationships:
   left_table: dm_order
   right_table: dm_date_dim                   # single shared date dim
   relationship_columns:
-  - left_column: DM_ORDER_ORDER_DATE         # renamed from ORDER_DATE
-    right_column: DATE_VALUE                 # renamed from "date"
+  - left_column: ORDER_DATE                   # not renamed — no collision with PK
+    right_column: DATE                       # reserved word — bare in relationship_columns
 - name: dm_order_to_dm_employee
   left_table: dm_order
   right_table: dm_employee
@@ -752,7 +753,7 @@ relationships:
   right_table: dm_date_dim                   # same shared date dim
   relationship_columns:
   - left_column: DM_INVENTORY_BALANCE_DATE   # renamed from BALANCE_DATE
-    right_column: DATE_VALUE
+    right_column: DATE                       # reserved word — bare in relationship_columns
 - name: dm_inventory_to_dm_product
   left_table: dm_inventory
   right_table: dm_product
@@ -767,7 +768,7 @@ Tables that appear as `right_table` need `primary_key`:
 - `dm_customer` → `CUSTOMER_ID`
 - `dm_employee` → `EMPLOYEE_ID`
 - `dm_category` → `CATEGORY_ID`
-- `dm_date_dim` → `DATE_VALUE`
+- `dm_date_dim` → `DATE`
 
 ---
 
@@ -815,8 +816,8 @@ tables:
     expr: dm_order.SHIP_COUNTRY
     data_type: TEXT
   time_dimensions:
-  - name: dm_order_order_date
-    expr: dm_order.DM_ORDER_ORDER_DATE
+  - name: order_date
+    expr: dm_order.ORDER_DATE
     data_type: DATE
   - name: required_date
     expr: dm_order.REQUIRED_DATE
@@ -837,8 +838,8 @@ tables:
     schema: PUBLIC_SV
     table: DM_ORDER_DETAIL
   dimensions:
-  - name: dm_order_detail_order_id
-    expr: dm_order_detail.DM_ORDER_DETAIL_ORDER_ID
+  - name: rrder_id
+    expr: dm_order_detail.RRDER_ID
     data_type: NUMBER
   - name: dm_order_detail_product_id
     expr: dm_order_detail.DM_ORDER_DETAIL_PRODUCT_ID
@@ -967,11 +968,11 @@ tables:
     table: DM_DATE_DIM
   primary_key:
     columns:
-    - DATE_VALUE
+    - DATE
   time_dimensions:
-  - name: date_value
+  - name: date
     synonyms: ["Transaction Date", "Order Date", "Balance Date", "Inventory Date"]
-    expr: dm_date_dim.DATE_VALUE
+    expr: dm_date_dim."DATE"
     data_type: DATE
 
 - name: dm_inventory
@@ -995,7 +996,7 @@ tables:
     expr: SUM(dm_inventory.FILLED_INVENTORY)
     non_additive_dimensions:
     - table: dm_date_dim
-      dimension: date_value
+      dimension: date
       sort_direction: ascending
       nulls_position: last
 
@@ -1004,7 +1005,7 @@ relationships:
   left_table: dm_order_detail
   right_table: dm_order
   relationship_columns:
-  - left_column: DM_ORDER_DETAIL_ORDER_ID
+  - left_column: RRDER_ID
     right_column: ORDER_ID
 - name: dm_order_detail_to_dm_product
   left_table: dm_order_detail
@@ -1022,8 +1023,8 @@ relationships:
   left_table: dm_order
   right_table: dm_date_dim
   relationship_columns:
-  - left_column: DM_ORDER_ORDER_DATE
-    right_column: DATE_VALUE
+  - left_column: ORDER_DATE
+    right_column: DATE
 - name: dm_order_to_dm_employee
   left_table: dm_order
   right_table: dm_employee
@@ -1041,7 +1042,7 @@ relationships:
   right_table: dm_date_dim
   relationship_columns:
   - left_column: DM_INVENTORY_BALANCE_DATE
-    right_column: DATE_VALUE
+    right_column: DATE
 - name: dm_inventory_to_dm_product
   left_table: dm_inventory
   right_table: dm_product
@@ -1062,9 +1063,9 @@ relationships:
    not in the model (e.g. `DM_SUPPLIER`). Skip any join where either side is not in
    `model_tables`.
 
-3. **Case-sensitive columns require wrapper views.** `DM_DATE_DIM.date` (lowercase)
-   cannot be used bare in `primary_key.columns` or `relationship_columns`. Create a
-   wrapper view that renames it to uppercase (`DATE_VALUE`).
+3. **Reserved-word columns require quoting in `expr`.** `DM_DATE_DIM.DATE` is a SQL
+   reserved word — use `dm_date_dim."DATE"` in `expr` fields but bare `DATE` in
+   `primary_key.columns` and `relationship_columns`.
 
 4. **FK/PK name conflicts require FK renaming.** When `PRODUCT_ID` appears in both
    `DM_ORDER_DETAIL` (FK) and `DM_PRODUCT` (PK), rename the FK in the wrapper view
@@ -1081,7 +1082,7 @@ relationships:
    pattern translates to a metric with `non_additive_dimensions`. The metric can
    reference the physical column directly — no `facts` section needed. The non-additive
    dimension should reference the **joined date dimension table** (e.g.
-   `dm_date_dim.date_value`), not a local FK column on the fact table.
+   `dm_date_dim.date`), not a local FK column on the fact table.
    Include `nulls_position: last` to match ThoughtSpot's `last_value` behaviour.
 
 7. **Metric naming must avoid cycles.** Snowflake's cycle detection is
@@ -1097,9 +1098,9 @@ relationships:
 9. **Percentage contribution uses `DIV0`.** When translating ratio formulas that divide
    by a `group_aggregate` result, use `DIV0` to handle division-by-zero safely.
 
-10. **Physical column typos are handled in wrapper views.** `RRDER_ID` (typo for
-    `ORDER_ID`) is renamed to `DM_ORDER_DETAIL_ORDER_ID` in the wrapper view, making
-    the semantic view clean regardless of the underlying data issue.
+10. **Physical column typos pass through when no PK collision exists.** `RRDER_ID` (typo
+    for `ORDER_ID`) does not collide with `DM_ORDER.ORDER_ID` since the names differ,
+    so no FK rename is needed. Rename only when FK and PK share the same column name.
 
 11. **Batch all wrapper view DDL into one SQL call.** Creating N views requires N+1 UI
     confirmations if done separately. Combine `CREATE SCHEMA` and all `CREATE VIEW`

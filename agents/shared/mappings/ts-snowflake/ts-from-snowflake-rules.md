@@ -16,22 +16,47 @@ create or replace semantic view DB.SCHEMA.VIEW_NAME
         DB.SCHEMA.TABLE_NAME [primary key (COL)],
         -- Explicit alias (reserved words, name conflicts)
         ALIAS as DB.SCHEMA."TABLE_NAME" [primary key (COL)],
+        -- Table-level comment + synonyms
+        DB.SCHEMA.TABLE comment='...' with synonyms=('Alt Name','...'),
         ...
     )
     relationships (
         REL_NAME as FROM_TABLE(FROM_COL) references TO_TABLE(TO_COL),
         ...
     )
-    dimensions (
-        -- All dimensions at view level (NOT nested per-table)
-        TABLE_REF.VIEW_COL as view_alias.DIM_NAME [comment='...'],
+    -- FACTS: row-level named expressions referenced by metrics (not all SVs have this)
+    facts (
+        TABLE.COL as view_alias.FACT_NAME,
+        EXPR as view_alias.FACT_NAME,   -- expression-based fact
         ...
     )
+    dimensions (
+        -- All dimensions at view level (NOT nested per-table)
+        TABLE_REF.VIEW_COL as view_alias.DIM_NAME [comment='...'] [with synonyms=(...)],
+        -- Visibility modifier: PRIVATE dims are hidden from Cortex Analyst
+        PRIVATE TABLE_REF.VIEW_COL as view_alias.DIM_NAME,
+        -- Cortex Search Service on a dimension
+        TABLE_REF.VIEW_COL as view_alias.DIM_NAME with cortex search service SVC_NAME,
+        ...
+    )
+    -- Uniqueness constraints (optional; inform cardinality)
+    unique (TABLE.COL_A, TABLE.COL_B) distinct TABLE.COL_C range between X and Y,
     metrics (
         -- Simple: TABLE_REF.VIEW_COL as AGG(view_alias.METRIC_NAME)
         TABLE_REF.VIEW_COL as SUM(view_alias.METRIC_NAME) [comment='...'],
+        -- Semi-additive: non additive by (DATE_TABLE.COL asc|desc nulls last)
+        TABLE_REF.VIEW_COL non additive by (DATE.COL desc nulls last) as SUM(view_alias.NAME),
+        -- Metric referencing another metric alias (USING <relationship>)
+        TABLE_REF.metric_alias USING REL_NAME as AGG(view_alias.NAME),
         -- Complex expressions appear as the right-hand side
         ...
+    )
+    comment='top-level view description'
+    -- Cortex Analyst clauses (optional; may appear after comment)
+    ai_sql_generation = 'ON'|'OFF'
+    ai_question_categorization = 'ON'|'OFF'
+    ai_verified_queries (
+        'query text' verified_by = 'username' ...
     )
     with extension (CA='{...cortex_analyst_context_json...}');
 ```
@@ -383,22 +408,25 @@ Do not confuse the two contexts.
 
 ---
 
-## Untranslatable SQL Patterns
+## Untranslatable vs pass-through (PT1)
 
-**Omit and log — do not include these as formula columns.**
+**AUTHORITY:** `ts-snowflake-formula-translation.md` is the single mapping authority.
+This file does not maintain a separate untranslatable list. Under PT1
+(`ts-model-conversion-invariants.md`):
+
+- Scalar SQL with no native TS mapping → `sql_*_op` pass-through (reliable)
+- Aggregate/window SQL with no native mapping → `sql_*_aggregate_op` pass-through, ALWAYS flagged for review
+- `TRY_CAST` has a native mapping (see formula translation reference)
+- `RANK() OVER` has a native mapping via `rank()` (see formula translation reference)
+- Omit-and-log is reserved for constructs PT1 explicitly excludes: CTEs/subqueries and
+  genuinely un-representable structures (not just unfamiliar functions)
+
+**Truly untranslatable (omit and log):**
 
 | Pattern | Example | Reason |
 |---|---|---|
-| Complex window functions | `RANK() OVER (...)`, `ROW_NUMBER() OVER (...)`, `LAG(x, n)`, `LEAD(x, n)` | No ThoughtSpot equivalent |
-| Running/moving window | `SUM(x) OVER (... ROWS BETWEEN ...)` | Use `cumulative_*` / `moving_*` only if exact match — otherwise omit |
-| CTEs / subqueries | `(SELECT ... FROM ...)` | Cannot be embedded in a formula |
-| JSON/variant access | `col:key::type`, `GET_PATH(col, 'k')` | Snowflake-specific |
-| `TRY_CAST`, `PARSE_JSON` | — | Snowflake-specific |
-| `LISTAGG`, `ARRAY_AGG` | — | No ThoughtSpot equivalent |
-| Unknown functions | `HAVERSINE(...)` | Not in ThoughtSpot |
-
-**Note:** `SUM/COUNT/AVG(x) OVER (PARTITION BY dims)` is NOT in this table — it IS
-translatable. See the "Translatable Window Function Patterns" section above.
+| CTEs / subqueries | `(SELECT ... FROM ...)` | Cannot be embedded in a ThoughtSpot formula |
+| Self-referential metrics | Metric A → Metric B → Metric A | Circular dependency; no formula representation |
 
 ---
 
