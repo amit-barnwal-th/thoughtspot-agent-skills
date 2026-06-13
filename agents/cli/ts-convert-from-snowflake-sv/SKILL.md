@@ -564,7 +564,12 @@ Extract the following:
    - **Window function**: `... OVER (PARTITION BY ...)` — translates to `group_sum`,
      `safe_divide(..., group_sum(...))` for contribution ratios, etc.
    - **Synonyms** + **description** mapping: same rule as dimensions.
-6. **Extension JSON** (`with extension (CA='...')`): parse for column type confirmation
+6. **Facts block** (if present): for each entry (`TABLE.FACT_NAME as EXPR [comment='...'] [with synonyms=(...)]`), record:
+   - Source: TABLE alias + fact name
+   - Expression (SQL): the right-hand side
+   - **Synonyms** + **description**: same mapping as dimensions
+   - **Visibility**: `PRIVATE` modifier if present
+7. **Extension JSON** (`with extension (CA='...')`): parse for column type confirmation
    (dimensions / time_dimensions / metrics per table). Do not map to ThoughtSpot.
 
 Build an internal map:
@@ -572,6 +577,7 @@ Build an internal map:
 - `relationships`: list of (name, from_alias, from_col, to_alias, to_col)
 - `columns` (flat): all dimensions and metrics, keyed by (table_alias, view_col), with
   display name, synonyms[], and description fields populated.
+- `facts`: keyed by (table_alias, fact_name) → {expression, comment, synonyms[], visibility}
 - `model_description`: from the top-level `comment='...'` clause
 
 **4x. Unrecognized-construct scan (MANDATORY — do not skip).** After extracting the known
@@ -580,7 +586,7 @@ construct this skill cannot yet convert. NEVER silently drop one:
 
 | Token | Construct | Action |
 |---|---|---|
-| `facts (` | FACTS block (row-level expressions metrics may reference) | Extract names+exprs; treat each fact as a candidate formula source in Step 9 resolution; if a metric references an unresolvable fact → FAIL that column loudly with the fact name |
+| `facts (` | FACTS block (row-level expressions metrics may reference) | Extract into the `facts` map (see item 6 above). Each fact becomes a `formulas[]` entry in Step 8 (see ts-from-snowflake-rules.md "Facts Block → ThoughtSpot"). Step 9's identifier resolution uses this map to resolve metric references to facts. If a metric references a fact name that was not successfully parsed → FAIL that column loudly with the fact name. |
 | `ai_sql_generation` / `ai_question_categorization` | CA custom instructions | Add Unmapped Report row: "Custom instructions present — review for ThoughtSpot data_model_instructions equivalent (GAP-06)" |
 | `ai_verified_queries` | CA verified queries | Unmapped Report row (GAP-05); note count |
 | `with cortex search service` | dimension search service | Unmapped Report row naming the dimension |
@@ -760,6 +766,17 @@ After import, re-export the updated TMLs to refresh the column map before Step 8
 
 ### Step 7: Find join names (Scenario A only)
 
+**Joinless semantic views (GAP-03):** if the relationships block is empty or absent
+(no relationships were parsed in Step 4), skip this step entirely. The model will have
+`model_tables` entries with no `joins[]` or `referencing_join`. This is a valid model
+configuration — ThoughtSpot models can contain multiple unjoined tables (though queries
+will be limited to columns from one table at a time).
+
+If there is only ONE table in the semantic view, there are no joins by definition.
+Skip this step and proceed to Step 8 with a single `model_tables` entry.
+
+---
+
 For each relationship in the semantic view, find the name of the pre-defined join
 in the ThoughtSpot Table objects.
 
@@ -798,6 +815,24 @@ doubt, copy the string character-for-character from the API response.
 
 **Identify the fact table** (the table that is never on the "TO" side of any relationship)
 — it gets no `referencing_join` and no `joins[]`.
+
+**Joinless models:** if no relationships exist, there is no fact table distinction.
+All tables are peers — list each as a `model_tables` entry with no `joins[]`, no
+`referencing_join`. Omit the `joins:` key entirely from each entry:
+
+```yaml
+model:
+  name: "{view_name}"
+  model_tables:
+  - id: TABLE_A
+    name: TABLE_A
+    fqn: "{guid_a}"
+  - id: TABLE_B
+    name: TABLE_B
+    fqn: "{guid_b}"
+  columns:
+  # columns from both tables, using column_id: TABLE_A::col or TABLE_B::col
+```
 
 **Critical `id` rules (applies to all scenarios):**
 - **`id` must equal `name` exactly** (same case, same characters). ThoughtSpot resolves
@@ -909,6 +944,22 @@ See `../../shared/schemas/ts-model-conversion-invariants.md` (I5).
 
 For each complex metric (formula expression):
 - See Step 9 for translation. Results go into `formulas[]`.
+
+For each **public fact** in the `facts` map:
+- Create a `formulas[]` entry with the translated expression (apply the same SQL →
+  ThoughtSpot formula rules as metrics). Use `column_type: MEASURE` for numeric
+  expressions and `column_type: ATTRIBUTE` for string/date expressions.
+- Create a paired `columns[]` entry with `formula_id` matching the formula's `id`.
+- For **private facts** referenced by at least one metric: create the formula with
+  `index_type: DONT_INDEX` on the `columns[]` entry. For private facts not referenced
+  by any metric: skip entirely.
+- Fact formulas are emitted **before** metric formulas in the `formulas[]` array
+  so that `[formula_<id>]` references resolve correctly. Metric formulas reference
+  facts by their formula `id` (e.g. `[formula_Tenure Months]`), NOT display name.
+
+See `../../shared/mappings/ts-snowflake/ts-from-snowflake-rules.md` "Facts Block →
+ThoughtSpot" for the full mapping pattern and examples.
+
 - **Never add `aggregation:` to a `formulas[]` entry** — formulas are self-contained
   via their `expr`. ThoughtSpot rejects TML with `FORMULA is not a valid aggregation type`.
 
@@ -957,7 +1008,58 @@ where it causes an import error).
 >
 > Consult the reference. Never reason from first principles about SQL window functions.
 
-For each metric whose `EXPR` is not a simple `AGG(table.col)`:
+**9a. Identifier resolution (MANDATORY pre-pass).**
+
+Before translating any metric expression, resolve every `table_alias.name` reference
+in the expression. Use the Identifier Resolution Algorithm in
+[../../shared/mappings/ts-snowflake/ts-from-snowflake-rules.md](../../shared/mappings/ts-snowflake/ts-from-snowflake-rules.md):
+
+1. **Physical column?** Check the ThoughtSpot Table TML columns for `table_alias`.
+   If `name` matches a column → use `[TABLE::col]` reference. No further resolution needed.
+
+2. **Fact?** Check the `facts` map for `(table_alias, name)`.
+   If found → use formula reference `[formula_<id>]` where `<id>` is the fact's
+   `id` value from its `formulas[]` entry (e.g. `formula_Tenure Months`). The
+   reference must use the formula `id`, NOT the display name — `[Tenure Months]`
+   fails during TML import; `[formula_Tenure Months]` succeeds. No `TABLE::` prefix.
+
+3. **Metric?** Check the `metrics` map for `(table_alias, name)`.
+   If found → this is **double aggregation**. Apply the Double Aggregation rules from
+   [../../shared/mappings/ts-snowflake/ts-from-snowflake-rules.md](../../shared/mappings/ts-snowflake/ts-from-snowflake-rules.md):
+
+   a. Find the relationship connecting the inner metric's table to the outer metric's
+      table. If the DDL uses `USING REL_NAME`, use that relationship. Otherwise, find
+      the relationship where one endpoint is the inner metric's table alias and the
+      other is the outer metric's table alias.
+
+   b. Identify the inner metric's aggregation function and column:
+      `INNER_AGG(inner_col)`.
+
+   c. Build the ThoughtSpot formula:
+      ```
+      outer_agg ( group_inner_agg ( [CHILD_TABLE::inner_col] , [PARENT_TABLE::pk_col] ) )
+      ```
+      Use `group_*` shorthand when one exists for the inner aggregation (`group_count`,
+      `group_sum`, `group_average`, `group_unique_count`, `group_min`, `group_max`).
+      Fall back to full `group_aggregate(inner_agg(...), {[PARENT::pk]}, query_filters())`
+      for other aggregation types.
+
+   d. If the inner metric itself references another metric (triple aggregation),
+      FAIL with: "Triple aggregation detected — `{outer}` → `{middle}` → `{inner}`.
+      This skill supports one level of metric-on-metric nesting."
+
+4. **None of the above?** FAIL the column loudly: "Metric references
+   `{table_alias}.{name}` which is not a physical column, fact, or metric."
+
+**Window metrics referencing metrics (GAP-13):** when a window function metric
+(e.g. `SUM(...) OVER (ORDER BY ... ROWS BETWEEN ...)`) references another metric
+in its base expression, resolve the inner metric first:
+- If the inner metric is a simple `AGG(col)`: inline the aggregation directly:
+  `cumulative_sum(count([TABLE::col]), [TABLE::order_col])`
+- Do NOT wrap in `group_aggregate` — cumulative/moving functions already handle
+  the aggregation grain internally.
+
+For each metric whose `EXPR` is not a simple `AGG(table.col)` (after applying identifier resolution above — references have been resolved or the metric has been translated via double aggregation):
 
 1. Apply the SQL → ThoughtSpot formula translation rules in
    [../../shared/mappings/ts-snowflake/ts-snowflake-formula-translation.md](../../shared/mappings/ts-snowflake/ts-snowflake-formula-translation.md)
@@ -1054,6 +1156,8 @@ Columns ({n} total):
 
 Formula translations:
   ✓ {name}: {sql_expr} → {ts_formula}
+  🔄 {name}: DOUBLE AGGREGATION — {outer_agg}(group_{inner_agg}(...))
+  📐 {name}: FACT REFERENCE — inlines fact expression (from {fact_name})
   ⚠ {name}: OMITTED — {reason}
 
 Spotter (AI search): enabled / disabled
@@ -1285,10 +1389,23 @@ After a successful import, output:
 | Column | Original SQL | Status | ThoughtSpot Formula |
 |---|---|---|---|
 | {name} | `{sql}` | ✓ Translated | `{ts_formula}` |
+| {name} | `{sql}` | 🔄 Double aggregation | `{ts_formula}` |
+| {name} | `{sql}` | 📐 Fact formula | `{ts_formula}` |
 | {name} | `{sql}` | ⚠ Omitted | {reason} |
 
 ### Not Mapped
 - Extension JSON (Cortex Analyst context): not translated to ThoughtSpot
+
+### Facts Mapped ({n})
+| Fact Name | Source Table | Expression | ThoughtSpot Formula |
+|---|---|---|---|
+| {name} | {table} | `{sql_expr}` | `{ts_formula}` |
+
+### Identifier Resolution Summary
+- Physical columns resolved: {n}
+- Fact references resolved: {n}
+- Double aggregation patterns: {n}
+- Unresolvable references: {n} (see OMITTED above)
 ```
 
 ---
@@ -1322,6 +1439,7 @@ Model in one pass through Steps 4–13.
 
 | Version | Date | Summary |
 |---|---|---|
+| 1.9.0 | 2026-06-13 | Identifier resolution engine: facts parsing (BL-003b), metric→fact resolution (BL-003c), double aggregation via group_aggregate (BL-003), window metrics referencing metrics (GAP-13), joinless SV handling (GAP-03/BL-004). |
 | 1.8.0 | 2026-06-13 | Fail-loud parsing (C5): Step 4x scans for facts, AI clauses, cortex search, private, unknown grammar. LEFT_OUTER join default (F5). Fix SV discovery SQL (F8). Fix Mode C comparison to translate before diff (F7). |
 | 1.7.1 | 2026-06-13 | Add "never normalise API response names" rule (reverse-port from CoCo). |
 | 1.7.0 | 2026-06-12 | Adopt PT1 pass-through policy (scalar reliable; flag aggregate pass-through for review). |
