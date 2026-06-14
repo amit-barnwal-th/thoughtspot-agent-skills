@@ -99,7 +99,8 @@ Steps:
   1.5. Choose session mode (A: single / B: merge / C: update) . you choose
   2.   Identify the semantic view ......................... you choose
   3.   Get the semantic view DDL .......................... auto
-  4.   Parse the DDL (incl. synonyms, descriptions) ....... auto
+  4.   Parse the DDL (synonyms, descriptions, range joins,
+       filter labels, verified queries) .................... auto
   5.   Table registration question (reuse or create) ...... you choose
   6.   Discover / create ThoughtSpot Table objects ........ auto (may ask for clarification)
   6D.  Apply SV table descriptions to TS Table TMLs ....... auto (when SV has table comments)
@@ -110,6 +111,7 @@ Steps:
  10.   Review checkpoint — inspect TML before import ...... you confirm
  11.   Import the model into ThoughtSpot .................. auto
  12.   Verify import and produce summary report ........... auto
+ 12.5. Import verified queries as NLS Feedback ............ auto (when SV has verified queries)
 
 File-only mode: at Step 10, choose FILE to write TML files for manual import.
 
@@ -547,14 +549,30 @@ Extract the following:
    - Fully-qualified table reference (`DB.SCHEMA.TABLE`) — this is the Snowflake view/table
    - Table alias (explicit `ALIAS as DB.SCHEMA.TABLE`, or defaults to last segment of the name)
    - Primary key column(s) (if present — marks this as a join target)
+   - **Range constraint** (if present): `constraint <NAME> distinct range between <START> and <END> exclusive`
+     — extract constraint name, start column, end column. Stored in `range_constraints` map
+     keyed by table alias. Used in Step 8 to generate range join `on` expressions.
    - **Table-level `comment='...'`** if present → maps to TS Table TML `table.description`.
-3. **Relationships block:** for each relationship (`REL_NAME as FROM(COL) references TO(COL)`), record:
-   - Relationship name, from table alias, from column, to table alias, to column
+3. **Relationships block:** for each relationship, record name, from table alias, from
+   column(s), to table alias, to column(s), and **join style**:
+   - **Equi-join (standard):** `REL_NAME as FROM(COL) references TO(COL)` — record as
+     `join_style: "equi"`.
+   - **Composite equi-join:** `REL_NAME as FROM(COL1, COL2) references TO(COL1, COL2)` —
+     multiple column pairs. Record as `join_style: "equi"` with parallel column lists.
+   - **Range join (BETWEEN):** `REL_NAME as FROM(COL) references TO(between START and END exclusive)` —
+     record as `join_style: "range"`, with `to_start` and `to_end` columns from the
+     BETWEEN clause. The `exclusive` keyword means half-open interval (`>=` start, `<` end).
+   - **ASOF join:** `REL_NAME as FROM(COL1, COL2) references TO(COL1, ASOF COL2)` —
+     record as `join_style: "asof"`. The equi-join columns pair normally; the ASOF column
+     generates a `>=` predicate.
 4. **Dimensions block** (flat, all tables): for each entry (`TABLE.COL as view_alias.NAME [with synonyms=(...)] [comment='...']`), record:
    - Source: TABLE alias + VIEW column name (column in the Snowflake view layer)
    - Semantic alias: `view_alias.NAME`
    - **Synonyms** list from `with synonyms=(...)` — first → display name, rest → `properties.synonyms`
    - **Description** from `comment='...'` → column `description`
+   - **Filter label**: if the entry contains `labels = (filter)` before the `as` keyword,
+     set `is_filter: true`. The expression after `as` is a BOOLEAN expression. See
+     `ts-from-snowflake-rules.md` "Filter Labels → ThoughtSpot" for the full mapping.
    - If no synonyms: title-cased NAME → display name
 5. **Metrics block** (flat): for each entry, record:
    - Simple: `TABLE.COL as AGG(view_alias.NAME)` — extract source column + aggregation
@@ -568,16 +586,26 @@ Extract the following:
    - Source: TABLE alias + fact name
    - Expression (SQL): the right-hand side
    - **Synonyms** + **description**: same mapping as dimensions
+   - **Filter label**: `labels = (filter)` before `as` → set `is_filter: true` (same rule as dimensions)
    - **Visibility**: `PRIVATE` modifier if present
 7. **Extension JSON** (`with extension (CA='...')`): parse for column type confirmation
    (dimensions / time_dimensions / metrics per table). Do not map to ThoughtSpot.
+8. **Verified queries** (`ai_verified_queries (...)`): if present after the `comment=`
+   clause, parse each query entry. Format:
+   ```
+   QUERY_NAME AS (QUESTION 'text' [VERIFIED_AT epoch] [ONBOARDING_QUESTION TRUE|FALSE] SQL 'select ...')
+   ```
+   Extract: name, question text, SQL string, verified_at timestamp, onboarding flag.
+   Store in `verified_queries` list. These are emitted as NLS Feedback TML after Model
+   import (Step 12). See `ts-from-snowflake-rules.md` "Verified Queries → NLS Feedback TML".
 
 Build an internal map:
-- `tables`: alias → fully-qualified ref, primary key, **table description**
-- `relationships`: list of (name, from_alias, from_col, to_alias, to_col)
+- `tables`: alias → fully-qualified ref, primary key, range_constraint (if any), **table description**
+- `relationships`: list of (name, from_alias, from_cols[], to_alias, to_cols[], **join_style** — one of `equi`, `range`, `asof`)
 - `columns` (flat): all dimensions and metrics, keyed by (table_alias, view_col), with
-  display name, synonyms[], and description fields populated.
-- `facts`: keyed by (table_alias, fact_name) → {expression, comment, synonyms[], visibility}
+  display name, synonyms[], description, and **is_filter** fields populated.
+- `facts`: keyed by (table_alias, fact_name) → {expression, comment, synonyms[], visibility, **is_filter**}
+- `verified_queries`: list of {name, question, sql, verified_at, onboarding}
 - `model_description`: from the top-level `comment='...'` clause
 
 **4x. Unrecognized-construct scan (MANDATORY — do not skip).** After extracting the known
@@ -588,10 +616,11 @@ construct this skill cannot yet convert. NEVER silently drop one:
 |---|---|---|
 | `facts (` | FACTS block (row-level expressions metrics may reference) | Extract into the `facts` map (see item 6 above). Each fact becomes a `formulas[]` entry in Step 8 (see ts-from-snowflake-rules.md "Facts Block → ThoughtSpot"). Step 9's identifier resolution uses this map to resolve metric references to facts. If a metric references a fact name that was not successfully parsed → FAIL that column loudly with the fact name. |
 | `ai_sql_generation` / `ai_question_categorization` | CA custom instructions | Add Unmapped Report row: "Custom instructions present — review for ThoughtSpot data_model_instructions equivalent (GAP-06)" |
-| `ai_verified_queries` | CA verified queries | Unmapped Report row (GAP-05); note count |
+| `ai_verified_queries` | CA verified queries | Parse into `verified_queries` list (see item 8 above). Emitted as NLS Feedback TML after Model import in Step 12 |
 | `with cortex search service` | dimension search service | Unmapped Report row naming the dimension |
 | `private` (as visibility modifier) | private dims/metrics | Convert but set `index_type: DONT_INDEX` + report |
-| `unique (` / `range between` | uniqueness constraints | Record for join cardinality inference (see Task 1.4) |
+| `unique (` | uniqueness constraints | Record for join cardinality inference (see Task 1.4) |
+| `range between` (NOT inside a `constraint` clause) | stray range token | STOP — likely an unsupported DDL variant; show user the unconsumed text |
 | anything else unparsed (non-whitespace remains after extraction) | unknown grammar | STOP and show the user the unconsumed text — the SV spec evolves; do not guess |
 
 **Top-level COMMENT extraction fix:** the `comment '...'` clause is no longer guaranteed to
@@ -766,14 +795,143 @@ After import, re-export the updated TMLs to refresh the column map before Step 8
 
 ### Step 7: Find join names (Scenario A only)
 
-**Joinless semantic views (GAP-03):** if the relationships block is empty or absent
-(no relationships were parsed in Step 4), skip this step entirely. The model will have
-`model_tables` entries with no `joins[]` or `referencing_join`. This is a valid model
-configuration — ThoughtSpot models can contain multiple unjoined tables (though queries
-will be limited to columns from one table at a time).
-
 If there is only ONE table in the semantic view, there are no joins by definition.
 Skip this step and proceed to Step 8 with a single `model_tables` entry.
+
+**Joinless semantic views (GAP-03) — multi-table SVs with no relationships:**
+
+If the SV has multiple tables but no `relationships(...)` block (or the block is empty),
+ThoughtSpot still requires joins for cross-table queries. Present the user with join
+discovery options:
+
+```
+No relationships defined in the Semantic View ({n} tables found).
+ThoughtSpot requires joins for cross-table queries.
+
+How should we discover joins?
+
+  1 — Auto-discover from database constraints (PK/FK)
+  2 — Analyse column overlap and suggest joins (deeper dive)
+  3 — I'll specify the joins manually
+  4 — Skip — create model with no joins (single-table queries only)
+```
+
+**Option 1 — Database constraint discovery:**
+
+Query Snowflake for foreign key relationships between the SV's tables:
+
+```sql
+-- For each table in the SV:
+SHOW IMPORTED KEYS IN TABLE {db}.{schema}.{table};
+```
+
+The result contains `pk_table_name`, `pk_column_name`, `fk_table_name`, `fk_column_name`,
+and `key_sequence` (for composite FKs with the same constraint name). Build relationships
+from these — each FK→PK pair becomes a join. Composite FKs (multiple rows with the same
+constraint name) become composite equi-joins.
+
+If FK constraints are found, present them for confirmation:
+
+```
+Found {n} foreign key relationships:
+
+  1. {FK_TABLE}.{FK_COL} → {PK_TABLE}.{PK_COL}  (MANY_TO_ONE)
+  2. {FK_TABLE}.({COL1},{COL2}) → {PK_TABLE}.({COL1},{COL2})  (composite, MANY_TO_ONE)
+
+Accept these joins? [Y / edit / skip]
+```
+
+If no FK constraints are found, offer to fall back to Option 2 (column overlap analysis).
+
+**Option 2 — Column overlap analysis (deeper dive):**
+
+For each pair of tables in the SV:
+
+1. **Scan column name overlap** — find columns with identical names (case-insensitive)
+   across the two tables:
+   ```sql
+   SELECT a.COLUMN_NAME
+   FROM INFORMATION_SCHEMA.COLUMNS a
+   JOIN INFORMATION_SCHEMA.COLUMNS b
+     ON UPPER(a.COLUMN_NAME) = UPPER(b.COLUMN_NAME)
+   WHERE a.TABLE_SCHEMA = '{schema}' AND a.TABLE_NAME = '{table_a}'
+     AND b.TABLE_SCHEMA = '{schema}' AND b.TABLE_NAME = '{table_b}'
+     AND a.TABLE_CATALOG = '{db}' AND b.TABLE_CATALOG = '{db}';
+   ```
+
+2. **Check composite key uniqueness** — for each candidate set of join columns,
+   verify uniqueness on the target table:
+   ```sql
+   SELECT COUNT(*) AS total_rows,
+          COUNT(DISTINCT ({col1}, {col2})) AS distinct_keys
+   FROM {db}.{schema}.{table};
+   ```
+   If `total_rows == distinct_keys`, the column set is a valid unique key.
+
+3. **Validate cardinality** — confirm the join direction:
+   ```sql
+   SELECT MAX(cnt) FROM (
+     SELECT {join_cols}, COUNT(*) AS cnt
+     FROM {db}.{schema}.{from_table}
+     GROUP BY {join_cols}
+   );
+   ```
+   `max(cnt) == 1` → ONE_TO_ONE; `max(cnt) > 1` → MANY_TO_ONE from the source table.
+
+4. **Present suggestions with evidence:**
+   ```
+   Suggested joins (based on column overlap analysis):
+
+     1. EMPLOYEES.(COMPANY_ID, DEPARTMENT) → EMPLOYEE_SUMMARY_VW.(COMPANY_ID, DEPARTMENT)
+        Uniqueness: 15 rows, 15 distinct keys ✓
+        Cardinality: MANY_TO_ONE (max 12 employees per group)
+        Type: LEFT_OUTER
+
+   Accept / Modify / Skip each:
+   ```
+
+**Option 3 — User-specified joins:**
+
+Prompt the user to define each join:
+
+```
+Specify joins between the {n} tables.
+
+For each join, provide:
+  From table: ______
+  From column(s): ______  (comma-separated for composite)
+  To table: ______
+  To column(s): ______
+  Cardinality: MANY_TO_ONE / ONE_TO_ONE / MANY_TO_MANY
+  Type: LEFT_OUTER (default) / INNER / RIGHT_OUTER / FULL_OUTER
+
+Add another join? [Y / done]
+```
+
+**Option 4 — Skip (separate model per table):**
+
+Since ThoughtSpot cannot query across unjoined tables in a single model, create a
+separate model for each table:
+
+```
+⚠ No joins defined. Creating {n} separate models — one per table.
+  Cross-table queries will not be possible.
+
+  Model 1: {TABLE_A} ({m} columns)
+  Model 2: {TABLE_B} ({p} columns)
+
+  You can combine them later by editing Model TML and adding joins.
+
+Proceed? [Y / n]
+```
+
+Each model gets its own `model_tables` entry (single table), its own columns
+(only those from that table), and its own formulas (only those referencing that
+table's columns). Import each model separately.
+
+All discovered/specified joins (Options 1–3) are added to the `relationships` map
+and treated identically to SV-declared relationships in Step 8 (inline joins on the
+FROM table).
 
 ---
 
@@ -816,23 +974,14 @@ doubt, copy the string character-for-character from the API response.
 **Identify the fact table** (the table that is never on the "TO" side of any relationship)
 — it gets no `referencing_join` and no `joins[]`.
 
-**Joinless models:** if no relationships exist, there is no fact table distinction.
-All tables are peers — list each as a `model_tables` entry with no `joins[]`, no
-`referencing_join`. Omit the `joins:` key entirely from each entry:
+**Joinless models (user chose Option 4 in Step 7):** create a **separate model per
+table**. Each model contains only columns and formulas that reference that table.
+Name each model `{view_name} — {TABLE_NAME}` (or let the user choose). Import each
+independently. Report all created models in Step 12.
 
-```yaml
-model:
-  name: "{view_name}"
-  model_tables:
-  - id: TABLE_A
-    name: TABLE_A
-    fqn: "{guid_a}"
-  - id: TABLE_B
-    name: TABLE_B
-    fqn: "{guid_b}"
-  columns:
-  # columns from both tables, using column_id: TABLE_A::col or TABLE_B::col
-```
+**Discovered joins (Options 1–3 in Step 7):** joins discovered via PK/FK constraints,
+column overlap analysis, or user specification are treated identically to SV-declared
+relationships — use inline `joins[]` on the FROM table entry (Scenario B pattern).
 
 **Critical `id` rules (applies to all scenarios):**
 - **`id` must equal `name` exactly** (same case, same characters). ThoughtSpot resolves
@@ -910,6 +1059,94 @@ model:
   columns:
   # ... same pattern as Scenario A ...
 ```
+
+**Range joins (Scenario B / Hybrid — `join_style: "range"`):**
+
+When a relationship has `join_style: "range"`, the `on` expression uses `>=` and `<`
+instead of `=`. The `exclusive` keyword in the DDL means half-open interval:
+
+```yaml
+joins:
+- name: "{rel_name}"
+  with: PERIOD_TABLE
+  on: "[FROM_TABLE::{col}] >= [PERIOD_TABLE::{start_col}] and [FROM_TABLE::{col}] < [PERIOD_TABLE::{end_col}]"
+  type: LEFT_OUTER
+  cardinality: MANY_TO_ONE
+```
+
+**ASOF joins (Scenario B / Hybrid — `join_style: "asof"`):**
+
+Equi-join columns pair with `=`; the ASOF column generates `>=`:
+
+```yaml
+joins:
+- name: "{rel_name}"
+  with: TO_TABLE
+  on: "[FROM_TABLE::{equi_col}] = [TO_TABLE::{equi_col}] and [FROM_TABLE::{asof_col}] >= [TO_TABLE::{asof_col}]"
+  type: LEFT_OUTER
+  cardinality: MANY_TO_ONE
+```
+
+**Composite equi-joins (multiple column pairs):**
+
+```yaml
+joins:
+- name: "{rel_name}"
+  with: TO_TABLE
+  on: "[FROM_TABLE::{col1}] = [TO_TABLE::{col1}] and [FROM_TABLE::{col2}] = [TO_TABLE::{col2}]"
+  type: LEFT_OUTER
+  cardinality: MANY_TO_ONE
+```
+
+**Filter labels → boolean formula columns:**
+
+For any dimension or fact with `is_filter: true`, create a boolean formula column
+(ATTRIBUTE, not MEASURE) regardless of whether the expression is numeric:
+
+```yaml
+formulas:
+- id: "formula_{display_name}"
+  name: "{display_name}"
+  expr: "if ( [TABLE::{col}] >= 90000 ) then true else false"   # translated from SV BOOLEAN_EXPR
+  properties:
+    column_type: ATTRIBUTE
+
+columns:
+- name: "{display_name}"
+  formula_id: "formula_{display_name}"
+  properties:
+    column_type: ATTRIBUTE
+```
+
+At the Step 10 review checkpoint, note which columns are filter-derived and offer
+the user the option to add them as model filters (default: column only).
+
+**Duplicate `column_id` detection (I8):**
+
+After assembling all `columns[]` entries, scan for duplicate `column_id` values.
+When two metrics reference the same physical column with different aggregations
+(e.g. `SUM(SALARY)` and `AVG(SALARY)`), keep only the first as a `column_id`-based
+entry (prefer SUM). Express all others as `formulas[]` entries:
+
+```yaml
+# First metric keeps column_id
+columns:
+- name: "Total Salary"
+  column_id: EMPLOYEES::SALARY
+  properties:
+    column_type: MEASURE
+    aggregation: SUM
+
+# Second metric becomes a formula
+formulas:
+- id: "formula_Avg Salary"
+  name: "Avg Salary"
+  expr: "average ( [EMPLOYEES::SALARY] )"
+  properties:
+    column_type: MEASURE
+```
+
+See `../../shared/schemas/ts-model-conversion-invariants.md` (I8).
 
 **Column entries — display name, synonyms, description:**
 
@@ -1160,6 +1397,12 @@ Formula translations:
   📐 {name}: FACT REFERENCE — inlines fact expression (from {fact_name})
   ⚠ {name}: OMITTED — {reason}
 
+Filter labels ({n}):
+  {name}: boolean formula (column only / also add as model filter?)
+
+Verified queries ({n}):
+  {name}: "{question}" → will import as NLS Feedback after Model import
+
 Spotter (AI search): enabled / disabled
 
 Proceed with import?
@@ -1406,7 +1649,54 @@ After a successful import, output:
 - Fact references resolved: {n}
 - Double aggregation patterns: {n}
 - Unresolvable references: {n} (see OMITTED above)
+
+### Filter Labels ({n})
+| Column | Source Expression | Type |
+|---|---|---|
+| {name} | `{boolean_expr}` | Boolean formula (ATTRIBUTE) |
+
+### Verified Queries ({n})
+| Query Name | Question | Status |
+|---|---|---|
+| {name} | {question} | ✓ Imported as NLS Feedback / ⚠ Manual review needed |
 ```
+
+---
+
+### Step 12.5: Import verified queries as NLS Feedback TML
+
+**Skip this step if `verified_queries` is empty.**
+
+After a successful Model import (Step 11), translate each verified query from the
+SV into NLS Feedback TML and import it against the newly-created Model.
+
+**SQL-to-search-token translation:**
+1. Map SV column names to TS Model display names (from the column mapping in Steps 8/9)
+2. `COUNT(col)` → `count [Col Display Name]`; `SUM(col)` → `sum [Col]`; `AVG(col)` → `avg [Col]`
+3. Non-aggregate SELECT columns → dimension tokens: `[Col Display Name]`
+4. `WHERE col = 'val'` → `[Col] = 'val'`
+
+**For each verified query with translatable SQL:**
+
+```yaml
+guid: "{model_guid}"
+nls_feedback:
+  feedback:
+  - id: "{index}"
+    type: REFERENCE_QUESTION
+    access: GLOBAL
+    feedback_phrase: "{question_text}"
+    search_tokens: "{translated_search_tokens}"
+    rating: UPVOTE
+    display_mode: UNDEFINED
+    chart_type: KPI
+```
+
+Import with: `source ~/.zshenv && ts tml import --policy ALL_OR_NONE --profile {profile}`
+
+**Complex SQL** (subqueries, CTEs, CASE, window functions) cannot be faithfully
+converted to search tokens. Log these in the report as "manual review needed" — do
+not attempt a partial translation.
 
 ---
 
