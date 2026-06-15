@@ -17,6 +17,26 @@ Databricks Asset Bundles.
 
 ---
 
+## What `databricks.yml` does
+
+`agents/databricks/databricks.yml` is a
+[Databricks Asset Bundle](https://docs.databricks.com/en/dev-tools/bundles/index.html)
+configuration file. Running `databricks bundle deploy` reads this file and
+deploys everything to your workspace in one command:
+
+| Section | What it controls |
+|---|---|
+| `bundle.name` | Bundle identity (`thoughtspot-skills`) |
+| `workspace.root_path` | Where files land in the workspace (`/Workspace/thoughtspot-skills`) |
+| `sync.include` | Which local files are synced — notebooks, skills, and shared references |
+| `resources.jobs.token_refresh` | A scheduled Databricks Workflow Job that runs `token_refresh.py` every 12 hours to keep ThoughtSpot auth tokens fresh (password and secret_key profiles only; bearer_token profiles are skipped) |
+| `targets` | Named deployment targets (`dev`, `prod`) — each points to a workspace host URL |
+
+You only need to edit the `targets` section (Step 1 below). Everything else
+works out of the box.
+
+---
+
 ## Step 1: Configure deployment target
 
 If you've already run `/ts-profile-databricks`, you can pull the workspace host
@@ -31,7 +51,8 @@ for p in profiles:
 "
 ```
 
-Copy the host URL for your target workspace and set it in `databricks.yml`:
+Copy the host URL for your target workspace and set it in
+`agents/databricks/databricks.yml`:
 
 ```yaml
 targets:
@@ -52,16 +73,28 @@ You can set up a full profile later with `/ts-profile-databricks`.
 
 ## Step 2: Deploy
 
+The `-t` flag selects which target from `databricks.yml` to deploy to. Use
+`dev` for development or `prod` for production — each target points to the
+workspace host you configured in Step 1.
+
 ```bash
 cd agents/databricks
 databricks bundle deploy -t dev
 ```
 
-This deploys:
+To deploy to production instead:
+
+```bash
+databricks bundle deploy -t prod
+```
+
+This syncs the following files to `/Workspace/thoughtspot-skills` in the
+target workspace and creates the token refresh job:
+
 - **Notebooks:** `ts_client.py`, `ts_profile_setup.py`, `token_refresh.py`
 - **Skills:** Two Genie Code conversion skills
 - **Shared files:** Mappings, schemas, worked examples from `agents/shared/`
-- **Token refresh job:** Scheduled every 12 hours
+- **Token refresh job:** Scheduled every 12 hours (see `databricks.yml` section above)
 
 ---
 
