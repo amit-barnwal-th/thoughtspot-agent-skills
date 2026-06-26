@@ -5,7 +5,11 @@ Skill-level changes are tracked in each skill's own `## Changelog` section.
 
 ---
 
+## 2026-06-27
+- feat: add `ts-load-source-data` skill v1.0.0 — load CSV data into Snowflake (or generate synthetic data from schema definitions) for ThoughtSpot to connect to; adds `ts-load-*` naming family to skill-naming.md and check_skill_naming.py
+
 ## 2026-06-26
+- feat: add `ts load` CLI command group — schema inference, synthetic data generation, Snowflake loading
 - feat: add `ts tableau download` command (ts-cli 0.15.0) — download published datasource content (TDSX) from Tableau Server/Cloud, extract archive, validate CSV files for row integrity (column count consistency, corrupt lines with proper quoted-field handling). Prerequisite for BL-010 (`ts-load-source-data`)
 - chore: bump ts-cli to v0.15.0
 - chore: bump ts-cli to v0.14.0 — register `ts tableau` command group (signin, datasources, datasource); add `--tableau` flag to `ts profiles list`
