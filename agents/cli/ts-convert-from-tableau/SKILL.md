@@ -41,6 +41,8 @@ the count-column + bin-style + cohort-handling decisions, or theme + parameter-c
 - ThoughtSpot profile configured — run `/ts-profile-thoughtspot` if not
 - `ts` CLI installed: `pip install -e tools/ts-cli`
 - Tableau workbook file (`.twb` or `.twbx`) accessible on disk
+- Tableau profile configured (optional) — run `/ts-profile-tableau` if migrating workbooks
+  with published datasources (`sqlproxy`). Not needed for workbooks with direct connections.
 - **The source tables and their data already exist in a warehouse, and a ThoughtSpot
   connection exposes them.** This skill creates ThoughtSpot *logical* objects (Table, Model,
   cohorts, Liveboard) **over existing physical tables** — it does **not** create warehouse
@@ -125,7 +127,8 @@ When the user picks **M**, immediately ask **what to migrate** — this decides 
   3.  Parse TWB XML — extract tables, columns, joins,
       calculated fields, blend relationships,
       table-calc addressing ............................ auto
-  4.  Confirm source tables (ask first; reuse/create/search) you choose  [scope 1,2]
+  3.5 Resolve published datasources (sqlproxy → API) ... auto/you choose  [scope 1,2]
+  4.  Confirm source tables (reuse/GUID/create/search) ..... you choose  [scope 1,2]
   4.5 Select ThoughtSpot connection (create path only) .... you choose  [scope 1,2]
   5.  Generate TML files (table + sql_view + model) ...... auto          [scope 1,2]
   5.5 Confirm Spotter (AI search) enablement (default Y) .. you choose   [scope 1,2]
@@ -829,6 +832,61 @@ for worksheet in root.findall('.//worksheet'):
 
 ---
 
+## Step 3.5 — Resolve Published Datasources (sqlproxy)
+
+> Runs only if Step 3 detected one or more datasources with `<connection class="sqlproxy">`.
+> Skipped entirely if all datasources have direct warehouse connections.
+
+When a Tableau workbook references a **published datasource** on Tableau Server/Cloud,
+the TWB XML contains `<connection class="sqlproxy">` with a `dbname` attribute naming the
+published datasource. The actual warehouse table/column definitions are on the server,
+not in the file.
+
+### Flow
+
+1. Prompt: "Found **{N}** published datasource(s) hosted on Tableau Server. To resolve
+   the underlying columns and formulas, I need to query the Tableau REST API.
+   Do you have a Tableau profile configured? (Run `/ts-profile-tableau` to set one up)"
+
+2. If the user declines or has no profile:
+   - Log: "Proceeding without Tableau API resolution. Published datasource columns will
+     use display names from the TWB file. Column mapping may need manual confirmation
+     in Step 4."
+   - Continue to Step 4 with the TWB `<metadata-records>` column info.
+
+3. For each sqlproxy datasource, extract `dbname` from the `<connection>` element, then:
+
+   ```bash
+   # Find the published datasource by name
+   ts tableau datasources --profile {PROFILE} --name "{dbname}"
+   ```
+
+   Parse the JSON output to get the datasource `id`.
+
+   ```bash
+   # Get field metadata
+   ts tableau datasource {id} --profile {PROFILE} --fields
+   ```
+
+   The `fields` array contains:
+
+   | Field | Use |
+   |---|---|
+   | `fieldCaption` | Column display name → ThoughtSpot column name |
+   | `dataType` | `real`/`integer`/`string`/`date`/`datetime`/`boolean` → TS data type |
+   | `columnClass` | `COLUMN` (physical), `CALCULATION` (formula), `BIN`, `GROUP` |
+   | `formula` | For calculated fields — the Tableau formula text for Step 5 translation |
+
+4. Merge the resolved fields into the parsed datasource structure, replacing opaque
+   sqlproxy column references with real names and types. Proceed to Step 4.
+
+### Prerequisites
+
+- Tableau profile configured via `/ts-profile-tableau` (optional — skill degrades gracefully)
+- `ts` CLI v0.14.0+ (includes `ts tableau` commands)
+
+---
+
 ## Step 4 — Confirm Source Tables (ask before searching)
 
 This is the **first** thing after the parse — **before** selecting a connection, searching
@@ -855,11 +913,12 @@ Source tables referenced by {workbook_name} ({N} total):
   …
 
 Do these already exist as ThoughtSpot Table objects?
-  E  Exist       — reuse them (I'll look up their GUIDs)
+  E  Exist       — reuse them (I'll search for their GUIDs)
+  G  Have GUIDs  — provide GUIDs directly (fastest, no search needed)
   N  Don't exist — create new on a connection            (default)
-  ?  Not sure    — search ThoughtSpot to find out
+  ?  Not sure    — search ThoughtSpot to check (avoids creating duplicates)
 
-Enter E / N / ? :
+Enter E / G / N / ? :
 ```
 
 If the tables differ in status (some exist, some don't), accept a per-table answer.
@@ -868,9 +927,25 @@ If the tables differ in status (some exist, some don't), accept a per-table answ
 
 - **N (don't exist)** → **no search.** Go to **Step 4.5** to pick the connection, then
   create Table TMLs in Step 5a (the default path).
+
+  > **Deduplication note:** if you are migrating **multiple workbooks** that share the same
+  > published datasource, the tables from the first migration already exist. Choosing **N**
+  > again creates duplicates. If this is a second (or later) workbook migration, consider
+  > **E**, **G**, or **?** instead to reuse the tables already in ThoughtSpot.
+
+- **G (have GUIDs)** → **no search.** For each table, ask the user to provide the GUID
+  (the `id` value from ThoughtSpot, e.g. from a previous migration or from the UI). Use
+  the provided GUIDs in the model's `model_tables[]` entries and **skip generating Table
+  TMLs** for those tables. If the user has GUIDs for some tables but not all, treat the
+  remaining tables as **N** (create via Step 4.5 + 5a).
+
 - **E (exist)** → search to find the GUIDs — but **choose the scope first** (4c).
+  Searching ensures the tables are not duplicated and resolves their GUIDs automatically.
+
 - **? (not sure)** → search — **choose the scope first** (4c). Report what was / wasn't
   found; reuse the found ones, treat not-found tables as create (Step 4.5 + 5a).
+  This is the safest option when migrating into an instance that may already have
+  some of these tables.
 
 ### 4c — Choose the search scope (E and ? paths only)
 
@@ -1016,8 +1091,35 @@ If only one connection exists in total, auto-select it and confirm regardless of
 Save the selected connection's exact `name` value as `{connection_name}`.
 
 **Resolving db / schema / table for new tables.** Each new table needs the `{db}`,
-`{schema}`, and `{db_table}` it maps to on the chosen connection. Prefer the cheapest
-source:
+`{schema}`, and `{db_table}` it maps to on the chosen connection. The Tableau workbook
+contains the *source environment's* database paths — these may not match the target
+ThoughtSpot connection (e.g. a consultant running the migration in their own environment
+with a different database). Always confirm before using them.
+
+Show the TWB-extracted paths and ask:
+
+```
+The Tableau workbook references these source database paths:
+  - {source_db}.{source_schema}.{table_1}
+  - {source_db}.{source_schema}.{table_2}
+  …
+
+Do these match your ThoughtSpot connection's database and schema?
+  Y  Yes — use these paths as-is
+  D  Different database/schema — I'll provide the correct values
+  T  Per-table — some match, some don't (I'll confirm each)
+
+Enter Y / D / T:
+```
+
+- **Y** → use the TWB-extracted `{db}`, `{schema}`, and `{db_table}` values directly.
+- **D** → ask for the target `{db}` and `{schema}` once. Apply them to all tables (table
+  names stay the same unless the user overrides). This is the common consultant scenario
+  where all tables live in the same database but under a different name.
+- **T** → walk through each table and confirm or override its `{db}`, `{schema}`, and
+  `{db_table}`. Use this when tables span multiple databases or schemas in the target.
+
+If the user doesn't know the correct paths:
 
 1. **Ask the user** for the db / schema (and table name if it differs from the source) —
    usually instant, and they know it.
