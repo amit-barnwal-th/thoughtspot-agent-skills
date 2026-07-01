@@ -20,7 +20,7 @@ ts_cli/
     connections.py — ts connections list / get / add-tables
     tables.py     — ts tables create
     tableau.py    — ts tableau (signin, datasources, download, translate-formulas)
-    audit.py      — ts audit run
+    audit.py      — ts audit run / report
   audit/
     __init__.py       — run_audit() entry point, angle module registry
     context.py        — AuditContext dataclass + build_context()
@@ -30,6 +30,9 @@ ts_cli/
     checks_human.py   — Human readiness checks (H1-H10)
     checks_perf.py    — Performance checks (P1-P18)
     checks_security.py — Security checks (S1-S10)
+    report.py         — HTML report renderer (compact payload + template injection)
+    report_template.html — Self-contained HTML template with CSS/JS
+    test_fixtures.py  — Realistic test data generator
 ```
 
 Each command group is a separate module in `commands/`. `cli.py` imports and registers each.
@@ -37,7 +40,7 @@ Each command group is a separate module in `commands/`. `cli.py` imports and reg
 ## Version sync
 
 `ts_cli/__init__.py __version__` must always match `pyproject.toml version`. Bump both together.
-Current version: **0.22.0**. Run `python tools/validate/check_version_sync.py` to verify.
+Current version: **0.24.0**. Run `python tools/validate/check_version_sync.py` to verify.
 
 ## Required dependencies
 
@@ -75,3 +78,16 @@ used anywhere in the repo.
 4. Update any `SKILL.md` that uses the command
 5. Add unit tests in `tools/ts-cli/tests/`
 6. Bump version in both `__init__.py` and `pyproject.toml`
+
+## Adding an audit check
+
+1. Write the `check_XX` function in the appropriate `audit/checks_*.py` module
+   (AI → `checks_ai.py`, Data → `checks_data.py`, etc.). The function receives
+   an `AuditContext` and returns a list of `Finding` objects.
+2. Add the function to `ALL_CHECKS` in the same module — this is the registry
+   that `run_audit()` iterates.
+3. Add unit tests in `tools/ts-cli/tests/` covering the check's logic.
+4. Add a row to `agents/cli/ts-audit/references/check-catalog.md` with the check ID,
+   what it detects, and severity logic.
+5. Bump version in both `__init__.py` and `pyproject.toml`.
+6. Run `pytest tools/ts-cli/tests/` and `python tools/validate/check_version_sync.py`.
