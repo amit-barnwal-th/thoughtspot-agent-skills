@@ -368,6 +368,7 @@ def fix_bare_refs(
     parameter_names: set[str],
     column_lookup: dict[str, str],
     table_name: str,
+    col_table_map: dict[str, str] | None = None,
 ) -> str:
     """Table-qualify bare [COLUMN] refs and prefix [formula_NAME] cross-refs.
 
@@ -379,8 +380,18 @@ def fix_bare_refs(
     - Parameter refs and already-qualified refs are left unchanged.
 
     column_lookup maps upper-cased column name → canonical db_column_name.
+
+    col_table_map (optional) maps upper-cased column name → a fully-qualified
+    ``TABLE::col`` id, for the multi-table case where a bare column does not
+    belong to ``table_name`` (the anchor). When a ref resolves here it is
+    qualified to its real owning table; otherwise the single-table
+    ``table_name`` fallback applies. Only columns whose base name is
+    unambiguous across the model's tables belong in this map — ambiguous
+    (shared) columns are deliberately omitted so they fall back to the anchor.
     """
     import re
+
+    ctm = col_table_map or {}
 
     def _replace(m: re.Match) -> str:
         ref = m.group(1)
@@ -390,11 +401,64 @@ def fix_bare_refs(
             return m.group(0)
         if ref in formula_names:
             return f"[formula_{ref}]"
+        if ref.upper() in ctm:
+            return f"[{ctm[ref.upper()]}]"
         if ref.upper() in column_lookup:
             return f"[{table_name}::{column_lookup[ref.upper()]}]"
         return m.group(0)
 
     return re.sub(r"\[([^\]]+)\]", _replace, expr)
+
+
+def build_col_table_map(
+    model_tml: dict, anchor_table: str | None = None
+) -> dict[str, str]:
+    """Map upper(name) → ``TABLE::col``, choosing the owning table per column.
+
+    For a multi-table model, ``fix_bare_refs`` needs to know which table a
+    bare column belongs to — the anchor-only fallback mis-qualifies columns
+    that live in a joined table (e.g. ``PERIOD_TYPE`` on a metrics table gets
+    wrongly prefixed with the promotion-master anchor).
+
+    Ownership rules per column base name (the ``::`` suffix):
+
+    - Owned by exactly ONE table → qualify to that table.
+    - Owned by two or more tables (shared join keys / repeated attributes):
+      qualify to the ``anchor_table`` if it is one of the owners (a shared
+      column resolves to the same value on either side of the join, and the
+      anchor is the safe default); otherwise qualify to the first owner in
+      model-column order. This last case is what rescues a column like
+      ``CUSTOMER_ID`` that is shared by two *joined* tables but absent from the
+      anchor — qualifying it to the anchor would fail at import.
+
+    Both the column_id suffix and the display name are indexed so either
+    reference form resolves.
+    """
+    homes: dict[str, list[str]] = {}
+    disp: dict[str, str] = {}
+    for c in model_tml.get("model", {}).get("columns", []):
+        cid = c.get("column_id", "")
+        if "::" not in cid:
+            continue
+        _, col = cid.split("::", 1)
+        homes.setdefault(col.upper(), []).append(cid)
+        disp[cid] = c.get("name", col)
+
+    lookup: dict[str, str] = {}
+    for col_upper, ids in homes.items():
+        if len(ids) == 1:
+            chosen = ids[0]
+        else:
+            # ambiguous — prefer the anchor when it owns the column, else the
+            # first owner in model-column order.
+            chosen = next(
+                (i for i in ids if i.split("::", 1)[0] == anchor_table), ids[0]
+            )
+        lookup[col_upper] = chosen
+        name = disp.get(chosen, "")
+        if name:
+            lookup[name.upper()] = chosen
+    return lookup
 
 
 def build_column_lookup(model_tml: dict) -> dict[str, str]:
@@ -426,58 +490,106 @@ def filter_unresolvable_formulas(
 ) -> tuple[list[dict], list[str]]:
     """Drop new formulas with references that won't resolve in ThoughtSpot.
 
-    Checks for:
+    Catches, deterministically (no import round-trips), the failure classes
+    that otherwise get peeled off one-per-cycle by the import-retry loop:
+
     - ``sqlproxy::`` table references (published datasource artifact)
     - ``Custom SQL Query`` references (unmapped CSQ)
     - Bare column names that match physical columns but lack table qualifiers
     - Unresolvable bare references (not a column, formula, or parameter)
     - ``+`` string concatenation that wasn't converted to ``concat()``
+    - **Qualified ``[TABLE::COL]`` refs whose column does not exist in the
+      model** (e.g. a formula that references ``REVENUE_FORECAST`` when no
+      table provides it). Previously these passed the filter and failed at
+      import.
+    - **Transitive cascade** — a formula that references ``[formula_X]`` where
+      ``X`` was itself dropped. Computed to a fixpoint here rather than
+      discovered one import round-trip at a time.
+
+    ``model_column_names`` is the set of physical column base names (the part
+    after ``::``) that exist across the model's tables.
 
     Returns (kept, dropped_names).
     """
-    import re
-    kept: list[dict] = []
-    dropped: list[str] = []
     col_upper = {c.upper() for c in model_column_names}
     formula_upper = {n.upper() for n in formula_names}
     param_upper = {n.upper() for n in parameter_names}
 
+    kept: list[dict] = []
+    dropped: list[str] = []
     for f in formulas:
         if f.get("id") in existing_formula_ids:
             kept.append(f)
             continue
-        expr = f.get("expr", "")
-        if "sqlproxy::" in expr.lower():
+        if _formula_is_unresolvable(
+            f.get("expr", ""), col_upper, formula_names, parameter_names,
+            formula_upper, param_upper,
+        ):
             dropped.append(f.get("name", f.get("id", "?")))
-            continue
-        if "custom sql query" in expr.lower():
-            dropped.append(f.get("name", f.get("id", "?")))
-            continue
-        # + between string literal and ref (unconverted string concat)
-        if re.search(r"'\s*\+\s*\[", expr) or re.search(r"\]\s*\+\s*'", expr):
-            dropped.append(f.get("name", f.get("id", "?")))
-            continue
-        # Bare references — unscoped physical columns or unknown names
-        # Strip string literals before extracting refs to avoid false
-        # positives from brackets inside strings like concat('[', ...)
-        expr_no_strings = re.sub(r"'[^']*'", "", expr)
-        has_bad_ref = False
-        for ref in re.findall(r"\[([^\]]+)\]", expr_no_strings):
-            if "::" in ref:
-                continue
-            if ref.startswith("formula_"):
-                continue
-            if ref in parameter_names or ref in formula_names:
-                continue
-            if ref.upper() in param_upper or ref.upper() in formula_upper:
-                continue
-            has_bad_ref = True
-            break
-        if has_bad_ref:
-            dropped.append(f.get("name", f.get("id", "?")))
-            continue
-        kept.append(f)
+        else:
+            kept.append(f)
 
+    return _cascade_drop_dependents(kept, dropped)
+
+
+def _formula_is_unresolvable(
+    expr: str,
+    col_upper: set[str],
+    formula_names: set[str],
+    parameter_names: set[str],
+    formula_upper: set[str],
+    param_upper: set[str],
+) -> bool:
+    """True if a formula expr has a reference that won't resolve at import."""
+    import re
+    low = expr.lower()
+    if "sqlproxy::" in low or "custom sql query" in low:
+        return True
+    # + between a string literal and a ref (unconverted string concat)
+    if re.search(r"'\s*\+\s*\[", expr) or re.search(r"\]\s*\+\s*'", expr):
+        return True
+    # Strip string literals first so a '[' inside a literal isn't read as a ref.
+    expr_no_strings = re.sub(r"'[^']*'", "", expr)
+    for ref in re.findall(r"\[([^\]]+)\]", expr_no_strings):
+        if ref.startswith("formula_"):
+            continue  # cross-formula ref — validated in the cascade pass
+        if "::" in ref:
+            # qualified column ref — column must exist in the model
+            if ref.split("::", 1)[1].upper() not in col_upper:
+                return True
+            continue
+        if ref in parameter_names or ref in formula_names:
+            continue
+        if ref.upper() in param_upper or ref.upper() in formula_upper:
+            continue
+        return True  # bare, unknown ref
+    return False
+
+
+def _cascade_drop_dependents(
+    kept: list[dict], dropped: list[str]
+) -> tuple[list[dict], list[str]]:
+    """Drop any kept formula referencing [formula_X] where X was dropped.
+
+    Iterates to a fixpoint. Only dropped formulas trigger this — a ref to a
+    pre-existing model formula (not in our new set) is fine.
+    """
+    import re
+    dropped_set = set(dropped)
+    changed = True
+    while changed:
+        changed = False
+        survivors: list[dict] = []
+        for f in kept:
+            refs = re.findall(r"\[formula_([^\]]+)\]", f.get("expr", ""))
+            if any(r in dropped_set for r in refs):
+                nm = f.get("name", f.get("id", "?"))
+                dropped.append(nm)
+                dropped_set.add(nm)
+                changed = True
+            else:
+                survivors.append(f)
+        kept = survivors
     return kept, dropped
 
 
