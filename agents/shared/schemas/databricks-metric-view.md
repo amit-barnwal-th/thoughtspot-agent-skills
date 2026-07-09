@@ -1,4 +1,4 @@
-<!-- currency: databricks — 2026-07 (external sweep: source forms widened to 4, using: joins, 5-value window range + anchor modifier, agg() synonym confirmed; see BL-032) -->
+<!-- currency: databricks — 2026-07 (PR1 window deep-analysis 2026-07-09: trailing/leading/cumulative/all/semi-additive range behavior live-verified against a Databricks fixture + ThoughtSpot number-match; corrected trailing/leading moving_sum anchor args (C1/C3) and the period-filter offset mechanism from wall-clock to row-relative (C6/C6a); exclusive-default confirmed (C2); materialization: block documented for the first time (C9); quarter/year period-offset grains Deferred (C8); see BL-032; PR1.5 semantic deep-dive 2026-07-09: LOD dimension × filter (A1) CONFIRMED filter-aware on TS under both filter kinds, cross-platform DIVERGENCE for a DBX consumer's ad hoc query-time WHERE (A2, DBX-internal asymmetry); cross-measure ratio × grain (B1) CONFIRMED ratio-of-sums cross-platform at every grain; global filter: × window ordering (C1) CONFIRMED filter-before-window cross-platform, frame semantics DIVERGENCE (date-interval vs row-positional); semi-additive × date-range filter (D1) CONFIRMED last/first-in-filtered-range cross-platform; trailing-window frame (E1) DIVERGENCE — DBX date-interval vs TS row-positional on gapped data, density caveat added; A3 follow-up (user-suggested) 2026-07-09: group_aggregate's `{}` filter argument CORRECTS the A1/A2 "no TS analogue" conclusion — `{}` is search-filter-blind but model-filter-aware, reproducing DBX's MV-filter-aware + query-WHERE-blind composite when paired with a mirrored model-level filters: block; subtraction form query_filters() - {col} import-accepted but does not exclude a derived-formula filter — see docs/audit/2026-07-09-dbx-semantic-claim-matrix.md; see BL-032) -->
 
 # Databricks Metric View Schema
 
@@ -96,8 +96,9 @@ case, not a supported flattening).
 > **version 1.1** only, and the `version` field **defaults to 1.1**; v0.1 is no longer
 > surfaced in the product docs. Treat this section as "may be encountered on older Metric
 > Views" — the from-databricks parser must still read it, but **emit v1.1 for all
-> conversions**. Newer GA constructs (top-level `materialization:`, `fields:` as an alias
-> for `dimensions:`) are tracked in **BL-032**.
+> conversions**. Newer GA constructs (top-level `materialization:` — see "Materialization
+> Block" below; `fields:` as an alias for `dimensions:` — see "`fields:` vs `dimensions:`"
+> below) originated from **BL-032** and are now documented in this file.
 
 Single source table, flat list of dimensions and measures, optional global filter.
 Column metadata is limited to `name`, `expr`, and `window` — no `display_name`,
@@ -113,6 +114,21 @@ source: catalog.schema.table_name   # Required. Table FQN, SQL query (parenthesi
 
 filter: <sql_boolean_expression>    # Optional. Global WHERE clause applied to all queries.
                                     # Uses column names from the source table directly.
+                                    # Live-verified 2026-07-09 (docs/audit/2026-07-09-dbx-
+                                    # semantic-claim-matrix.md, A1/A2): this global filter IS
+                                    # seen by a partition-window LOD dimension computed inside
+                                    # the same MV — but an ad hoc query-time WHERE clause
+                                    # layered on top of an MV with NO global filter: is
+                                    # filter-BLIND for that same LOD dimension (it prunes output
+                                    # rows only, not the window's computed value). See the
+                                    # Filter section of ts-from-databricks-rules.md /
+                                    # ts-to-databricks-rules.md for the ThoughtSpot-side caveat.
+                                    # A3 follow-up, live-verified 2026-07-09 (same matrix):
+                                    # ThoughtSpot's group_aggregate(sum(x), {dim}, {}) + a
+                                    # model-level filters: block mirroring this filter:
+                                    # reproduces BOTH the filter-aware (this block) and the
+                                    # filter-blind (ad hoc query-time WHERE) DBX conditions in
+                                    # one construct — see the same rules-files section.
 
 dimensions:                         # Optional (but a MV with no dimensions or measures is useless).
   - name: <identifier>              # Required. Only 3 fields allowed: name, expr, window.
@@ -225,7 +241,11 @@ source: catalog.schema.table_name   # Single-source mode — same as v0.1. Also 
                                     # query (parenthesized or bare) or another metric view —
                                     # see Source Forms above.
 
-filter: <sql_boolean_expression>    # Optional. Global WHERE clause.
+filter: <sql_boolean_expression>    # Optional. Global WHERE clause. See the "Live-verified
+                                    # 2026-07-09" note under the v0.1 `filter:` field above —
+                                    # this global filter IS seen by LOD/window dimensions
+                                    # computed in the same MV; an ad hoc query-time WHERE on an
+                                    # unfiltered MV is not.
 
 dimensions:                         # GA canonical key is `fields:`; `dimensions:` accepted for backward compat.
   - name: <identifier>              # Required. Machine-readable identifier.
@@ -284,6 +304,9 @@ joins:                              # Optional. Dimension table joins.
           at_most_one_match: true
 
 filter: <sql_boolean_expression>    # Optional. Uses alias.column or source.column syntax.
+                                    # Same MV-filter-vs-query-time-WHERE asymmetry applies —
+                                    # see the "Live-verified 2026-07-09" note under the v0.1
+                                    # `filter:` field above.
 
 dimensions:                         # GA canonical key is `fields:`; `dimensions:` accepted for backward compat.
   - name: <identifier>
@@ -438,21 +461,68 @@ measures:
         range: cumulative           # running total
 ```
 
+**Live-verified 2026-07-09 — row-relative, not wall-clock** (matrix C6/C6a,
+`docs/audit/2026-07-08-dbx-window-claim-matrix.md`): `range: current` (with or
+without `offset`) is evaluated **relative to each output row's own period**, as
+ordered by the `order:` dimension — it is **not** anchored to wall-clock `today()`.
+Querying `prior_month_revenue` across a multi-month trend returns the *previous row's*
+period value for every row (a `LAG`-style shift), not a filter to a single fixed
+calendar month. An out-of-range `offset` (e.g. the earliest row has no "prior" row)
+evaluates to `NULL`, not `0`. See
+[ts-databricks-formula-translation.md](../mappings/ts-databricks/ts-databricks-formula-translation.md)
+for the corrected ThoughtSpot translation.
+
 | `range` value | Meaning |
 |---|---|
 | `current` | Current period only |
 | `cumulative` | Running total from start to current period |
 | `trailing <N> <unit>` | Rolling look-back window of `<N> <unit>` (e.g. `trailing 7 day`) ending at the anchor row |
-| `leading <N> <unit>` (verified 2026-07 — spec only) | Rolling look-ahead window of `<N> <unit>` starting at the anchor row. **ThoughtSpot translation pending live verification** — see [ts-databricks-formula-translation.md](../mappings/ts-databricks/ts-databricks-formula-translation.md) and BL-032. |
-| `all` (verified 2026-07 — spec only) | The entire partition, unbounded in both directions. **ThoughtSpot translation pending live verification** — see BL-032. |
+| `leading <N> <unit>` | Rolling look-ahead window of `<N> <unit>` starting at the anchor row. **Live-verified 2026-07-09** — see [ts-databricks-formula-translation.md](../mappings/ts-databricks/ts-databricks-formula-translation.md) and `docs/audit/2026-07-08-dbx-window-claim-matrix.md` (C3). |
+| `all` | The entire partition, unbounded in both directions — scoped **per query partition**, not table-wide. **Live-verified 2026-07-09** — see the same matrix (C4). |
 
-**Anchor-row modifier (verified 2026-07):** `trailing` and `leading` ranges accept
-an optional `inclusive|exclusive` modifier (e.g. `trailing 7 day exclusive`)
-controlling whether the anchor (current) row is included in the window.
+**Anchor-row modifier (Live-verified 2026-07-09 — matrix C1/C2/C3):** `trailing` and
+`leading` ranges accept an optional `inclusive|exclusive` modifier (e.g.
+`trailing 7 day exclusive`) controlling whether the anchor (current) row is included
+in the window. The modifier applies **only** to `trailing`/`leading` — `current`,
+`cumulative`, and `all` do not accept it.
+
 **Default: `exclusive`** (Runtime 18.1 + YAML 1.1; DBSQL 2026.10 preview, release
-note 2026-03-26). The `trailing N day` ↔ `moving_sum([m], N, 0, [date])`
-equivalence documented in this repo predates the exclusive-default confirmation
-and needs re-verification against a live instance — tracked in BL-032.
+note 2026-03-26) — confirmed live 2026-07-08: `trailing N day` == `trailing N day
+exclusive` at all 24 fixture rows, including matched boundary `NULL`s (matrix C2).
+
+**Corrected ThoughtSpot equivalence.** The `trailing N day` ↔ `moving_sum([m], N, 0,
+[date])` mapping documented in this repo before 2026-07-09 is **wrong** —
+`moving_sum([m], N, 0, [date])` always includes the anchor row, so it reproduces
+`trailing (N+1) day inclusive`, not `trailing N day` (default/exclusive). Corrected
+mappings (all four forms live-verified against every row of a 24-row fixture,
+including boundary partial-window/NULL rows):
+
+| DBX Metric View `range` | ThoughtSpot formula |
+|---|---|
+| `trailing N day` (default) / `trailing N day exclusive` | `moving_sum([m], N, -1, [date])` |
+| `trailing N day inclusive` | `moving_sum([m], N-1, 0, [date])` |
+| `leading N day` (default) / `leading N day exclusive` | `moving_sum([m], -1, N, [date])` |
+| `leading N day inclusive` | `moving_sum([m], 0, N-1, [date])` |
+
+**Live-verified 2026-07-09** — see `docs/audit/2026-07-08-dbx-window-claim-matrix.md`
+(C1, C2, C3).
+
+**Density caveat (E1, live-verified 2026-07-09 on gapped data) — see
+`docs/audit/2026-07-09-dbx-semantic-claim-matrix.md`.** The four corrected mappings
+above were re-verified on data with date gaps and found to **diverge**: Databricks'
+`trailing`/`leading N day` frame is a genuine date-interval window, while ThoughtSpot's
+`moving_sum` counts rows. On dense daily data the two framings are indistinguishable
+(which is why the original C1/C3 verification above didn't catch this); on gapped data
+they produce different numbers.
+
+Row-positional: matches Databricks' date-interval trailing/leading windows only when the order column is dense at the window's unit grain (one row per unit, no gaps) — see docs/audit/2026-07-09-dbx-semantic-claim-matrix.md (E1).
+
+**Partial-window / boundary behavior (Live-verified 2026-07-09 — matrix bonus
+finding):** Databricks `trailing`/`leading` windows return a **partial sum** when
+1..N-1 rows are available in the requested direction, and `NULL` only when **zero**
+rows are available — never an error, never a silent 0. ThoughtSpot's `moving_sum`
+matches this exactly at every boundary row of the fixture. An out-of-range `offset`
+(see below) also evaluates to `NULL` on both platforms.
 
 `offset` uses `<-N period>` syntax where period is `month`, `year`, `day`, etc.
 Cross-measure references can then compute growth rates:
@@ -461,6 +531,52 @@ Cross-measure references can then compute growth rates:
   - name: mom_growth_pct
     expr: (MEASURE(monthly_revenue) - MEASURE(prior_month_revenue)) / MEASURE(prior_month_revenue) * 100
 ```
+
+### Materialization Block (Public Preview)
+
+`materialization:` is a top-level key — a sibling of `source:`, `fields:`/`dimensions:`,
+`measures:`, `joins:`, and `filter:` — that configures automatic query acceleration via
+materialized views. **Public Preview** status (per the `yaml-reference` docs page;
+`create-edit` does not mention this block at all). Absent by default: omitting
+`materialization:` does not change query semantics, only whether Databricks maintains
+an acceleration structure behind the Metric View.
+
+| Field | Required? | Notes |
+|---|---|---|
+| `schedule` | Optional | Refresh schedule string, same syntax as the materialized-view `SCHEDULE` clause (e.g. `every 6 hours`) |
+| `mode` | Required | Only documented value today: `relaxed` |
+| `materialized_views[]` | Required | List of materialization definitions |
+| `materialized_views[].name` | Required | Identifier for the materialized view |
+| `materialized_views[].type` | Required | `aggregated` or `unaggregated` |
+| `materialized_views[].dimensions[]` | Conditional | Field names to materialize (documented alongside `aggregated` type) |
+| `materialized_views[].measures[]` | Conditional | Measure names to materialize (documented alongside `aggregated` type) |
+
+```yaml
+materialization:
+  schedule: every 6 hours
+  mode: relaxed
+  materialized_views:
+    - name: baseline
+      type: unaggregated
+    - name: daily_status_metrics
+      type: aggregated
+      dimensions:
+        - order_date
+        - order_status
+      measures:
+        - total_revenue
+        - order_count
+```
+
+**No ThoughtSpot equivalent** — this is a Databricks-side performance/refresh hint
+with no analog in Model TML. See
+[ts-databricks-properties.md](../mappings/ts-databricks/ts-databricks-properties.md)
+("MV fields with no TS equivalent").
+
+**verified 2026-07-08** — docs research only, see
+`docs/audit/2026-07-08-dbx-window-docs-findings.md`; not live-SQL-tested (the parser
+only needs to recognize the block's shape and pass it through, not execute
+materialization).
 
 ### LOD Patterns (verified 2026-05-25)
 
@@ -681,7 +797,7 @@ measures:
 | LOD | Via SQL expressions | Dimension window functions: `SUM(x) OVER (PARTITION BY dim)` |
 | Semi-additive | `last_value()` in SQL | `window: [{order: dim, range: current, semiadditive: last}]` |
 | Cross-measure refs | Via SQL expressions | `MEASURE(measure_name)` + `ANY_VALUE(dim_name)` |
-| Global filter | Not a concept | `filter:` block |
+| Global filter | Not a concept | `filter:` block — filter-aware for LOD/window dimensions computed inside the same MV; an ad hoc query-time `WHERE` on an MV with no `filter:` is filter-blind for those same dimensions (live-verified 2026-07-09, `docs/audit/2026-07-09-dbx-semantic-claim-matrix.md` A1/A2). ThoughtSpot's `group_aggregate(sum(x), {dim}, {})` + a mirrored model-level `filters:` block reproduces both the filter-aware and filter-blind DBX readings at once (A3, same matrix) |
 | CA extension | `with extension (CA='...')` | Not applicable |
 | Preview required | No | No — GA since 2026-04-02 |
 

@@ -379,6 +379,30 @@ Translatable — add as `dimensions[]` entry. LOD results go to **dimensions**, 
 measures. Do NOT use `AGGREGATE OVER` — it causes `PARSE_SYNTAX_ERROR`. Do NOT use
 `window:` for LOD — `window` requires `semiadditive`.
 
+**Live-verified 2026-07-09 — first time this construct has been queried under any
+filter** (see `docs/audit/2026-07-09-dbx-semantic-claim-matrix.md`, A1/A2). On the
+ThoughtSpot side, the source `group_aggregate(..., query_filters())` this dimension
+was translated from is **CONFIRMED** filter-aware under both a query-level pin and
+a model-level `filters:` block. On the emitted Databricks side, the
+`SUM(source.QUANTITY) OVER (PARTITION BY ...)` dimension above reproduces that
+filter-awareness **only** for a Databricks consumer whose filter is baked into this
+MV's own global `filter:` block — a consumer who instead applies an ad hoc
+query-time `WHERE` on the MV gets a filter-**blind** `Category Quantity` (the
+`WHERE` prunes output rows, not the window's computed value). This is a
+Databricks-side asymmetry to flag for the consuming team, not a defect in this
+translation.
+
+**A3 follow-up, live-verified 2026-07-09** (see
+`docs/audit/2026-07-09-dbx-semantic-claim-matrix.md`, A3) — if the source
+ThoughtSpot formula had instead used `group_aggregate(sum(x), {dim}, {})` (the
+empty-set filter argument) with a model-level `filters:` block mirroring this MV's
+`filter:`, the emitted `SUM(x) OVER (PARTITION BY ...)` dimension would reproduce
+**both** DBX conditions above — filter-aware for the MV's own global `filter:` AND
+filter-blind for an ad hoc query-time `WHERE`. `query_filters()` remains the right
+default here (simpler formula, matches the common case); `{}` is the refinement to
+reach for only when a consumer specifically needs the query-time-`WHERE`-blind
+behavior reproduced.
+
 ---
 
 ### Formula 4: `Category Contribution Ratio` (MEASURE — cross-references)
@@ -396,6 +420,12 @@ Translation:
 Translatable — add as `measures[]` entry. Uses `MEASURE()` for measure-to-measure
 references and `ANY_VALUE()` for dimension-from-measure references.
 
+**Live-verified 2026-07-09 across query grain** (see
+`docs/audit/2026-07-09-dbx-semantic-claim-matrix.md`, B1) — this is the exact
+`MEASURE(a) / ANY_VALUE(b)` cross-measure ratio pattern Battery B tested: **CONFIRMED**
+to compute true ratio-of-sums, cross-platform, at every grain (fine/coarse/total) —
+no formula change or grain caveat needed.
+
 ---
 
 ### Formula 5: `Monthly Revenue` (period filter — current month)
@@ -403,6 +433,18 @@ references and `ANY_VALUE()` for dimension-from-measure references.
 ```
 sum_if ( diff_months ( [DM_DATE_DIM::DATE_VALUE] , today ( ) ) = 0 , [DM_ORDER_DETAIL::LINE_TOTAL] )
 ```
+
+> **Corrected 2026-07-09 — approximation caveat (matrix C6, `docs/audit/2026-07-08-dbx-window-claim-matrix.md`).**
+> Live testing established that Databricks `window: [{range: current, offset: ...}]`
+> is **row-relative** (a `LAG`-style shift relative to each output row's own period),
+> not anchored to wall-clock `today()` like the source TS formula above. The
+> translation below is the closest available Databricks construct, but it is a
+> **lossy approximation**: it is exact only when the query returns a single row for
+> the current period (the single-snapshot pattern this example was verified
+> against on 2026-05-25); querying `monthly_revenue`/`prior_month_revenue` across a
+> multi-month trend would diverge from the wall-clock source formula's intent. Flag
+> this caveat when converting a wall-clock `sum_if(diff_months(...), today())`
+> formula for a model that will be queried as a trend, not a single KPI snapshot.
 
 Translation:
 - Pattern: `sum_if(diff_months([date], today()) = 0, [m])` → period-filter window
@@ -443,6 +485,8 @@ Translation:
   ```
 
 Translatable — add as `measures[]` with `window: [{range: current, offset: -1 month}]`.
+**Caveat (2026-07-09):** this DBX construct is row-relative, not wall-clock — see
+the note under Formula 5 above.
 
 ---
 
@@ -468,6 +512,13 @@ Translation:
 Translatable — add as `measures[]` in the Inventory MV. The `order:` references a
 raw date dimension, distinguishing this from the period-filter pattern (which uses a
 truncated period).
+
+**Live-verified 2026-07-09 under a query-time date-range filter** (see
+`docs/audit/2026-07-09-dbx-semantic-claim-matrix.md`, D1) — **CONFIRMED
+cross-platform**: `last_value` and the equivalent Databricks `window:` measure both
+collapse to the last observation *within the filtered range* under a query-level
+date-range pin (e.g. "this quarter"), identical values on both platforms including
+the single-surviving-row edge case. No formula change needed.
 
 ---
 
@@ -519,7 +570,7 @@ Translatable — add as `measures[]` using Databricks `FILTER (WHERE ...)` synta
 | `category_contribution_ratio` | formula | `COALESCE(MEASURE(quantity) / NULLIF(ANY_VALUE(category_quantity), 0), 0)` | Category Contribution Ratio | Cross-refs via MEASURE() and ANY_VALUE() |
 | `monthly_revenue` | formula_Monthly Revenue | `SUM(source.LINE_TOTAL)` | Monthly Revenue | Window: `range: current`, `order: order_month` |
 | `prior_month_revenue` | formula_Prior Month Revenue | `SUM(source.LINE_TOTAL)` | Prior Month Revenue | Window: `range: current`, `offset: -1 month` |
-| `mom_growth_pct` | (derived) | `(MEASURE(monthly_revenue) - MEASURE(prior_month_revenue)) / MEASURE(prior_month_revenue) * 100` | MoM Growth % | Derived from two period-filter measures |
+| `mom_growth_pct` | (derived) | `(MEASURE(monthly_revenue) - MEASURE(prior_month_revenue)) / MEASURE(prior_month_revenue) * 100` | MoM Growth % | Derived from two period-filter measures. `MEASURE()` cross-references in this ratio are **CONFIRMED** grain-safe (B1, live-verified 2026-07-09, `docs/audit/2026-07-09-dbx-semantic-claim-matrix.md`); the underlying `monthly_revenue`/`prior_month_revenue` measures still carry the row-relative-vs-wall-clock caveat from C6/C6a (see Formula 5/6 above) |
 | `active_customers` | formula_Active Customers | `COUNT(DISTINCT orders.customers.CUSTOMER_ID) FILTER (WHERE source.LINE_TOTAL > 0)` | Active Customers | Conditional aggregate |
 
 ### Full YAML Output — Sales MV
@@ -1028,6 +1079,9 @@ GROUP BY product_category, product_name
 ORDER BY contribution DESC
 
 -- Sales: period-over-period (MoM)
+-- Caveat (2026-07-09): this multi-month query returns ROW-RELATIVE values
+-- (each row's prior_month is its own previous period), which diverges from
+-- the wall-clock intent of the source TS formula — see the Formula 5 caveat.
 SELECT order_month,
   MEASURE(monthly_revenue) AS current_month,
   MEASURE(prior_month_revenue) AS prior_month,
@@ -1151,7 +1205,11 @@ flattened view is created.
    to `window: [{order: order_month, semiadditive: last, range: current}]` where
    `order_month` is a computed dimension with `DATE_TRUNC('MONTH', ...)`. The prior
    month adds `offset: -1 month`. Growth % is derived via `MEASURE()` references
-   to both period measures.
+   to both period measures. **Caveat added 2026-07-09** (matrix C6,
+   `docs/audit/2026-07-08-dbx-window-claim-matrix.md`): Databricks' `range:
+   current`/`offset` is row-relative, not wall-clock like the source TS formula —
+   this translation is exact only for a single-current-period snapshot query, not
+   a multi-period trend. See Formula 5 above for the full caveat.
 
 8. **Conditional aggregates: `*_if` → `FILTER (WHERE ...)`.** ThoughtSpot's
    `unique_count_if(cond, x)` maps to `COUNT(DISTINCT x) FILTER (WHERE cond)`.

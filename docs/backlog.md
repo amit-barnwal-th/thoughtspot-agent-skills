@@ -1053,6 +1053,69 @@ underpins a large translation block but is marked **Experimental** in current do
    `moving_sum([m], N, 0, [date])` equivalence against the documented `exclusive` anchor
    default, which postdates when that equivalence was first recorded.
 
+   **Update 2026-07-09 (PR1 live verification):** `trailing N day` (default/exclusive) —
+   CORRECTED (was `moving_sum([m], N, 0, [date])`, which actually reproduces `trailing
+   (N+1) day inclusive`; now `moving_sum([m], N, -1, [date])`). `inclusive|exclusive`
+   anchor default — CONFIRMED `exclusive`. `leading N day` (default/exclusive) —
+   CORRECTED (was PENDING candidate `moving_sum([m], 0, N, [date])`, which matches
+   neither DBX form; now `moving_sum([m], -1, N, [date])`). `range: all` (partition-wide
+   `group_aggregate(...)`) — CONFIRMED. `range: cumulative` (`cumulative_sum(...)`) —
+   CONFIRMED. `semiadditive: last`/`first` (`last_value`/`first_value`) — CONFIRMED.
+   `range: current` + `offset: -N <unit>` — CORRECTED (was wall-clock
+   `sum_if(diff_months/quarters/years([date], today())=N, [m])`; live testing showed
+   the mechanism is row-relative, not wall-clock — now `moving_sum([m], N, -N, [date])`,
+   a LAG(N) idiom valid only with exactly one row per period; quarter/year grains and
+   N>1 are Deferred (C8), extrapolated from the verified month-grain N=1 case, not
+   separately live-tested). Full evidence:
+   `docs/audit/2026-07-08-dbx-window-claim-matrix.md`. Remaining BL-032 scope:
+   `materialization:`/`fields:` **parser** support (PR2, not a docs gap) and C8's
+   quarter/year grain re-verification if ever needed. Window `range`/`offset`/
+   `semiadditive`/anchor-modifier semantics are now fully resolved — the parser can
+   implement all 5 range values directly in PR2, no `pending_verification` skip path
+   needed for `leading`/`all`.
+
+   **Update 2026-07-09 (PR1.5 semantic deep-dive):** LOD dimension × filter
+   interaction — CONFIRMED filter-aware on ThoughtSpot under both filter kinds
+   (query-level pin and model-level `filters:`), with a cross-platform DIVERGENCE
+   caveat: the equivalence holds for a Databricks MV's own global `filter:` block
+   only, not for a consumer's ad hoc query-time `WHERE` on an unfiltered MV (A1/A2).
+   Cross-measure ratio × grain — CONFIRMED ratio-of-sums cross-platform at every
+   grain tested (fine/coarse/total), no sum-of-ratios or average-of-ratios
+   divergence (B1). Global filter × window ordering — CONFIRMED filter-before-window
+   cross-platform; split verdict, frame semantics DIVERGENCE (C1, same root cause as
+   E1 below). Semi-additive × date-range filter — CONFIRMED last/first-in-filtered-
+   range cross-platform, including the single-surviving-row edge case (D1).
+   Trailing-frame rows-vs-dates (E1, gapped-data probe of PR1's C1/C3) — DIVERGENCE:
+   Databricks `trailing`/`leading N day` frames are date-interval framed; ThoughtSpot
+   `moving_sum` is row-positional; the two produce different numbers on sparse/gapped
+   data. PR1's C1/C3 CONFIRMED verdicts were density-conditional (dense daily fixture
+   only) — this is now caveated in every trailing/leading mapping site. Filed
+   BL-098 for the E1/C1-frame divergence's follow-up action items (PR2 density-check
+   warning flag, PR3 sparse-data-risk annotation). Full evidence:
+   `docs/audit/2026-07-09-dbx-semantic-claim-matrix.md`. This closes the remaining
+   discriminating-experiment gap the spec's PR 1.5 paragraph flagged — all four
+   dimension/metric semantic constructs now carry a live-verified verdict before
+   PR 3 (`translate-formulas`) encodes them in code.
+
+   **Update 2026-07-09 (A3, user-suggested follow-up to A1/A2):** the A1/A2 "DBX's
+   filter-kind sensitivity has no TS analogue" conclusion is CORRECTED. Live-tested
+   `group_aggregate`'s documented empty-set filter argument, `group_aggregate(sum(x),
+   {dim}, {})`: it is blind to a search-level/query-time filter (matches DBX's ad hoc
+   query-time `WHERE`-blind reading) but still respects a model-level `filters:`
+   block (matches DBX's own MV-global-`filter:`-aware reading) — exactly DBX's
+   composite. `group_aggregate(sum(x), {dim}, {})` + a model-level `filters:` block
+   mirroring the MV's `filter:` therefore reproduces BOTH halves of the DBX
+   composite in one ThoughtSpot construct. `query_filters()` remains the default LOD
+   mapping (simpler formula, matches the common MV-global-`filter:` case); `{}` +
+   a mirrored model filter is the refinement for reproducing a DBX consumer's ad hoc
+   query-time-`WHERE`-blind LOD specifically. A candidate subtraction form,
+   `query_filters() - { [TABLE::col] }` (also documented in
+   `thoughtspot-formula-patterns.md`), was import-accepted but did not exclude a
+   filter pinned on a *derived* boolean formula built from the subtracted column —
+   recorded as a live finding, not a working alternative. No new backlog item filed
+   — this is a resolved refinement, not an open divergence or blocker. Full evidence:
+   `docs/audit/2026-07-09-dbx-semantic-claim-matrix.md` (A3).
+
 **Target:** 2026-09-30.
 
 ---
@@ -1686,6 +1749,17 @@ Once the mapping surface stabilises, extraction becomes higher-value.
 **Target:** Assess feasibility by 2026-09-30. Schedule extraction only if mapping churn
 has slowed and the quality gap is confirmed via smoke-test comparison.
 
+**Update 2026-07-09 (PR1 feasibility-gate check):** per the design spec's Risks table
+("if PR1 finds more high-severity drift than BL-064 already catalogued, stop and
+re-raise feasibility before PR 2"), PR1's live window-semantics deep-analysis
+(`docs/audit/2026-07-08-dbx-window-claim-matrix.md`) found 2 corrected mappings beyond
+BL-064's catalogue — C1 (`trailing N day` anchor args) and C6 (`range: current` +
+`offset` mechanism, wall-clock → row-relative). This is real drift, but both are now
+resolved and locked with live citations against a Databricks fixture + ThoughtSpot
+number-match; nothing is left PENDING or unresolved. **Stop-condition NOT triggered** —
+this is in line with (not beyond) the churn BL-064 already catalogued. PR2
+(`ts databricks parse-mv`/`translate-formulas`) may proceed.
+
 ---
 
 ## BL-064 — External audit 2026-06-28: Databricks + Snowflake product-currency fixes
@@ -1719,10 +1793,10 @@ docs and the current product state.
 7. `custom_instructions`/`module_custom_instructions` YAML fields not documented
 8. `unique_keys` shown with wrong YAML structure in properties file
 9. Complete Schema block missing ~15 now-supported YAML fields
-10. Three new Databricks window range types undocumented (`leading`, `all`, inclusive/exclusive)
-11. Phantom `entities:`/`db_connection:` syntax in ts-to-databricks-rules.md
-12. `safe_divide` "No DIV0" comment is wrong; comparison table still says "Preview required"
-13. `materialization:` block not documented
+10. Three new Databricks window range types undocumented (`leading`, `all`, inclusive/exclusive) — **FIXED** (PR1, 2026-07-09). leading/all/inclusive-exclusive now documented in databricks-metric-view.md + both mapping files with live-verification citations — see the PR1 window-claim matrix.
+11. Phantom `entities:`/`db_connection:` syntax in ts-to-databricks-rules.md — **RESOLVED — verified absent 2026-07-09.** No entities:/db_connection: syntax found in ts-to-databricks-rules.md or ts-databricks-properties.md as of this check; likely fixed silently in an earlier PR (#136/#137 touched adjacent Databricks fixes). No action taken.
+12. `safe_divide` "No DIV0" comment is wrong; comparison table still says "Preview required" — **Partially fixed** — "Preview required" claim confirmed already corrected (verified 2026-07-09). The safe_divide/try_divide comment fix remains open (does not intersect PR1's window/materialization/fields scope) — deferred to the existing medium-severity target 2026-09-30.
+13. `materialization:` block not documented — **FIXED** (PR1, 2026-07-09). Materialization block documented in databricks-metric-view.md (new section) and ts-databricks-properties.md — see Task 1 docs-research findings.
 
 ### ThoughtSpot medium-severity (separate, lower urgency)
 
@@ -2512,3 +2586,106 @@ in #188 and overlaps the deferred "logical-relationship → join cardinality" ga
 **Target:** next multi-query build-model work; needed for FedEx VEDR (2 joined Custom SQL sources).
 
 ---
+
+## BL-095 — ts-cli: `connections add-tables` omits required `authenticationType`; instance `updateConnectionV2` 500s
+
+**Source:** 2026-07-08 BL-063 PR1 Task 5 live run against se-thoughtspot (diagnostics recorded in `docs/audit/2026-07-08-dbx-window-claim-matrix.md`, Task-5 BLOCKED subsections, incl. incident GUIDs for a support ticket).
+**Affects:** `tools/ts-cli/ts_cli/commands/connections.py::add_tables()`; any skill relying on `ts connections add-tables`.
+**Status:** OPEN.
+
+Two distinct findings:
+
+1. **ts-cli bug (fix in ts-cli):** `add_tables()` never sends `authenticationType` on
+   `POST /api/rest/2.0/connections/{id}/update`. Confirmed via
+   `get-rest-api-reference(apiName: "updateConnection")`: for any connection whose
+   `authentication_type` ≠ SERVICE_ACCOUNT the field is required, otherwise the backend
+   silently treats the payload as SERVICE_ACCOUNT. Fix: read the target connection's auth
+   type and include it in the update payload; unit-test the payload shape.
+2. **Probable build defect (verify on a newer build / support ticket):** even with a
+   corrected payload, `updateConnectionV2` returned a uniform generic 500
+   (`code: 10000`, `debug: "[null]"`) across 4 payload variants and 2 independently
+   healthy connections (PAT and SERVICE_ACCOUNT) on the se-thoughtspot build of
+   2026-07-08. Re-verify after the fix in (1) lands and on a newer cloud build before
+   assuming the CLI fix alone resolves it; incident GUIDs are in the claim matrix.
+
+**Target:** fix (1) opportunistically with the next ts-cli connections work or by 2026-08-31; (2) re-check when (1) ships.
+
+---
+
+## BL-096 — se-thoughtspot build: SpotQL `generate-sql`/`fetch-data` endpoints return an empty-body 500
+
+**Source:** 2026-07-09 BL-063 PR1 Task 5 live TS-side number-match run against se-thoughtspot (diagnostics recorded in `docs/audit/2026-07-08-dbx-window-claim-matrix.md`, "TS-side number-match results (Task 5, live 2026-07-09)" execution-path note).
+**Affects:** `ts-object-model-spotql-query` skill; `ts spotql fetch-data` (and any command depending on it).
+**Status:** OPEN.
+
+The SpotQL endpoints (`/callosum/v1/v2/data/spotql/generate-sql` / `fetch-data`) return
+a bare, empty-body HTTP 500 for any payload on this se-thoughtspot build — including an
+empty request body, which a live handler would reject as a structured 400 — so `ts
+spotql fetch-data` was unusable (its output normalises to `status: UNKNOWN`). Task 5
+worked around this by fetching data via the stable v2 `POST /api/rest/2.0/searchdata`
+endpoint instead (spec confirmed via `get-rest-api-reference(apiName: "searchData")`),
+through a scratch script reusing `ts_cli.client.ThoughtSpotClient` for auth — the
+documented open-items-style exception in `.claude/rules/ts-cli.md`, since ts-cli has no
+`searchdata` command yet. `ts spotql classify-columns --model` is unaffected (it
+classifies from exported TML, with no server-side SpotQL dependency).
+
+**Target:** re-verify on the next se-thoughtspot build; if the 500 persists, add a
+`searchdata`-based fallback to ts-cli's SpotQL commands. No date set — revisit next
+time SpotQL commands are exercised live.
+
+---
+
+## BL-097 — ts-cli: `_stdin_has_piped_content()` hangs forever on an open non-TTY stdin
+
+**Source:** 2026-07-09 BL-063 PR1 Task 5 live run against se-thoughtspot — `ts tml import --file` invoked from a script context (diagnostics recorded in `docs/audit/2026-07-08-dbx-window-claim-matrix.md`, "TS-side number-match results (Task 5, live 2026-07-09)" import-iterations note).
+**Affects:** `tools/ts-cli/ts_cli/commands/tml.py:182` (`_stdin_has_piped_content()`); any skill or script invoking `ts tml import`/`ts tml lint` from a non-interactive shell with an open stdin.
+**Status:** OPEN.
+
+`_stdin_has_piped_content()` blocks on `sys.stdin.read()` whenever stdin is open but
+not a TTY and nothing has actually been piped in (e.g. a background shell context) — it
+hangs forever instead of falling through to the `--file`/`--dir` path. The workaround
+used during Task 5 was `< /dev/null`. Fix: only read stdin when `select`/`poll` reports
+data ready, or stdin is explicitly closed/piped — never an unconditional blocking read;
+add a unit test covering the non-TTY-no-data case.
+
+**Target:** fix opportunistically with the next ts-cli tml-command work or by 2026-08-31.
+
+---
+
+## BL-098 — Databricks trailing/leading window translation: date-interval vs row-positional frame semantics diverge on sparse data (E1/C1)
+
+**Source:** 2026-07-09 BL-063 PR1.5 semantic deep-dive, claim IDs E1 (Trailing-window frame
+semantics) and the frame-semantics half of C1's split verdict (Global `filter:` × window
+ordering). Full evidence: `docs/audit/2026-07-09-dbx-semantic-claim-matrix.md`.
+**Affects:** `ts-convert-from-databricks-mv` and `ts-convert-to-databricks-mv` skills (both
+directions' `trailing`/`leading` `range:` mapping); the planned BL-063 PR2
+(`ts databricks parse-mv`) and PR3 (`ts databricks translate-formulas`) substrate.
+**Status:** OPEN.
+
+Databricks `trailing N day`/`leading N day` window frames are date-interval framed — the
+frame boundary is a calendar-date interval intersected with surviving rows. ThoughtSpot's
+`moving_sum`/`moving_average` (the documented translation target) is row-positional — it
+counts N preceding/following surviving *rows*, not calendar days. On dense, gapless daily
+data the two framings are indistinguishable, which is why PR 1's C1/C3 CONFIRMED verdicts
+(obtained on a dense fixture) did not catch this. On sparse/gapped data — a category with
+missing days, or any filter that removes rows unevenly — the two platforms compute
+different trailing/leading sums: live-verified on cat Z's gapped fixture, days 5/8, DBX
+20/50 vs. TS 30/80. No `moving_sum` argument shape reconciles the two; this is a genuine
+platform divergence, not a formula bug, and it is now caveated at every trailing/leading
+mapping site (both directions, both SKILL.md files, the schema doc, all three mapping
+files, and `ts-databricks-properties.md`).
+
+### Approach
+
+1. PR2 (`ts databricks parse-mv`) should emit a density-check warning flag on any measure
+   using a `trailing`/`leading`/`window` `range:` — flagging when the parsed MV's source
+   table cannot be confirmed dense at the query grain (no date gaps).
+2. PR3 (`ts databricks translate-formulas`) must mark every trailing/leading translation
+   with a sparse-data-risk caveat in its output (a `pending_verification`-style annotation)
+   rather than asserting equivalence unconditionally.
+3. A future live probe should test DENSE non-day units (e.g. month grain) to confirm the
+   date-interval/row-positional distinction — and its practical impact — generalizes beyond
+   daily grain.
+
+**Target:** resolve as part of BL-063 PR2/PR3 scope (tied to those PRs' delivery, no fixed
+calendar date).

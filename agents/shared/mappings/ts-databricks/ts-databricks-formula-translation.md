@@ -1,4 +1,4 @@
-<!-- currency: databricks — 2026-07 (external sweep: window range now 5 values — leading/all added, pending live verification; inclusive|exclusive anchor modifier documented; see BL-032) -->
+<!-- currency: databricks — 2026-07 (PR1 window deep-analysis 2026-07-09: all 5 range values + inclusive|exclusive anchor modifier live-verified against a Databricks fixture + ThoughtSpot number-match — trailing/leading moving_sum args corrected (C1/C3), exclusive default confirmed (C2), all/cumulative/semi-additive confirmed (C4/C5/C7), period-filter offset corrected to row-relative (C6/C6a); quarter/year offset grains Deferred (C8); see BL-032; PR1.5 semantic deep-dive 2026-07-09: LOD dimension × filter (A1) CONFIRMED filter-aware on TS under both filter kinds, cross-platform DIVERGENCE for a DBX consumer's ad hoc query-time WHERE (A2, DBX-internal asymmetry); cross-measure ratio × grain (B1) CONFIRMED ratio-of-sums cross-platform at every grain; global filter: × window ordering (C1) CONFIRMED filter-before-window cross-platform, frame semantics DIVERGENCE (date-interval vs row-positional); semi-additive × date-range filter (D1) CONFIRMED last/first-in-filtered-range cross-platform; trailing-window frame (E1) DIVERGENCE — DBX date-interval vs TS row-positional on gapped data, density caveat added; A3 follow-up (user-suggested) 2026-07-09: group_aggregate's `{}` filter argument CORRECTS the A1/A2 "no TS analogue" conclusion — `{}` is search-filter-blind but model-filter-aware, reproducing DBX's MV-filter-aware + query-WHERE-blind composite when paired with a mirrored model-level filters: block; subtraction form query_filters() - {col} import-accepted but does not exclude a derived-formula filter — see docs/audit/2026-07-09-dbx-semantic-claim-matrix.md; see BL-032) -->
 
 # Formula Translation Reference — Databricks
 
@@ -261,68 +261,132 @@ Databricks SQL equivalents.
 
 | ThoughtSpot | Databricks SQL | Notes |
 |---|---|---|
-| `moving_sum(measure, window)` | `SUM(measure) OVER (ORDER BY {sort_col} ROWS BETWEEN {window-1} PRECEDING AND CURRENT ROW)` | |
-| `moving_average(measure, window)` | `AVG(measure) OVER (ORDER BY {sort_col} ROWS BETWEEN {window-1} PRECEDING AND CURRENT ROW)` | |
-| `moving_max(measure, window)` | `MAX(measure) OVER (ORDER BY {sort_col} ROWS BETWEEN {window-1} PRECEDING AND CURRENT ROW)` | |
-| `moving_min(measure, window)` | `MIN(measure) OVER (ORDER BY {sort_col} ROWS BETWEEN {window-1} PRECEDING AND CURRENT ROW)` | |
+| `moving_sum(measure, s, e, sort_col)` | `SUM(measure) OVER (ORDER BY {sort_col} ROWS BETWEEN {s} PRECEDING AND {e < 0 ? ABS(e) PRECEDING : e FOLLOWING})` | 4-arg signature, not 2-arg — window spans `[-s, +e]` rows around the current row (opposite-sign convention on `e`; see Rolling Window Functions below). Live-verified 2026-07-09 — `docs/audit/2026-07-08-dbx-window-claim-matrix.md` (C1/C3) |
+| `moving_average(measure, s, e, sort_col)` | `AVG(measure) OVER (ORDER BY {sort_col} ROWS BETWEEN {s} PRECEDING AND {e < 0 ? ABS(e) PRECEDING : e FOLLOWING})` | Same signature and frame rule as `moving_sum` above |
+| `moving_max(measure, s, e, sort_col)` | `MAX(measure) OVER (ORDER BY {sort_col} ROWS BETWEEN {s} PRECEDING AND {e < 0 ? ABS(e) PRECEDING : e FOLLOWING})` | Same 4-arg signature and frame rule as `moving_sum` above; not separately live-tested |
+| `moving_min(measure, s, e, sort_col)` | `MIN(measure) OVER (ORDER BY {sort_col} ROWS BETWEEN {s} PRECEDING AND {e < 0 ? ABS(e) PRECEDING : e FOLLOWING})` | Same 4-arg signature and frame rule as `moving_sum` above; not separately live-tested |
 
 ### Rolling Window Functions
 
 Databricks MV `window: [{range: trailing N day}]` is a date-based rolling window.
 ThoughtSpot's `moving_sum`/`moving_average` operate on row counts, not calendar days,
 so the mapping assumes one row per day (daily grain). If the source data has multiple
-rows per day or gaps, the results may differ.
+rows per day or gaps, the results may differ. `moving_sum`'s argument order is
+`moving_sum(measure, start, end, sort_column)` — see
+[../../schemas/thoughtspot-formula-patterns.md](../../schemas/thoughtspot-formula-patterns.md#moving-functions)
+for the `start`/`end` opposite-sign convention this section relies on.
+
+**Corrected 2026-07-09 (matrix C1/C2, `docs/audit/2026-07-08-dbx-window-claim-matrix.md`).**
+`moving_sum([m], N, 0, [date])` always includes the anchor row (`end=0` means "up to
+and including the current row"), so it spans **N+1 rows** and reproduces `trailing
+(N+1) day inclusive` — **not** `trailing N day` (Databricks' default/exclusive form).
+The tables below are the corrected mappings, live-verified at every row of a 24-row
+fixture including boundary partial-window/`NULL` rows.
 
 #### Databricks → TS
 
 | Databricks MV YAML | ThoughtSpot formula | Notes |
 |---|---|---|
-| `window: [{order: date_dim, range: trailing 7 day, semiadditive: last}]` | `moving_sum ( [m] , 7 , 0 , [date] )` | 7-day rolling sum |
-| `window: [{order: date_dim, range: trailing 30 day, semiadditive: last}]` | `moving_sum ( [m] , 30 , 0 , [date] )` | 30-day rolling sum |
-| `window: [{order: date_dim, range: trailing N day, semiadditive: last}]` | `moving_sum ( [m] , N , 0 , [date] )` | General pattern |
-| `window: [{order: date_dim, range: trailing 7 day, semiadditive: last}]` (avg) | `moving_average ( [m] , 7 , 0 , [date] )` | Rolling average variant |
+| `window: [{order: date_dim, range: trailing 7 day, semiadditive: last}]` (default/exclusive) | `moving_sum ( [m] , 7 , -1 , [date] )` | 7-day rolling sum, anchor excluded |
+| `window: [{order: date_dim, range: trailing 7 day exclusive, semiadditive: last}]` | `moving_sum ( [m] , 7 , -1 , [date] )` | Explicit exclusive — same as default |
+| `window: [{order: date_dim, range: trailing 7 day inclusive, semiadditive: last}]` | `moving_sum ( [m] , 6 , 0 , [date] )` | Anchor included — 7 rows total |
+| `window: [{order: date_dim, range: trailing N day, semiadditive: last}]` (default/exclusive) | `moving_sum ( [m] , N , -1 , [date] )` | General pattern |
+| `window: [{order: date_dim, range: trailing N day inclusive, semiadditive: last}]` | `moving_sum ( [m] , N-1 , 0 , [date] )` | General pattern |
+| `window: [{order: date_dim, range: trailing 7 day, semiadditive: last}]` (avg) | `moving_average ( [m] , 7 , -1 , [date] )` | Rolling average variant |
 
-`moving_sum(measure, window_size, look_ahead, sort_column)`:
-- `window_size` = N (the trailing day count)
-- `look_ahead` = 0 (no forward-looking rows)
-- `sort_column` = the date dimension
+**Live-verified 2026-07-09** — see
+`docs/audit/2026-07-08-dbx-window-claim-matrix.md` (C1, C2). Boundary behavior
+matches on both platforms: a partial sum when 1..N-1 rows are available, `NULL`
+only when zero rows are available.
+
+**Density caveat (E1, live-verified 2026-07-09 on gapped data — see
+`docs/audit/2026-07-09-dbx-semantic-claim-matrix.md`).** The tables above and below
+were re-verified against a fixture with date gaps and found to **diverge**:
+Databricks' `trailing N day` is a genuine date-interval window; `moving_sum` counts
+rows. On dense daily data the two framings are identical, which is why the C1/C2
+verification above didn't surface this.
+
+Row-positional: matches Databricks' date-interval trailing/leading windows only when the order column is dense at the window's unit grain (one row per unit, no gaps) — see docs/audit/2026-07-09-dbx-semantic-claim-matrix.md (E1).
 
 #### TS → Databricks
 
 | ThoughtSpot | Databricks MV YAML |
 |---|---|
-| `moving_sum([m], 7, 0, [d])` | `expr: SUM(m)` + `window: [{order: date_dim, range: trailing 7 day, semiadditive: last}]` |
-| `moving_average([m], 30, 0, [d])` | `expr: AVG(m)` + `window: [{order: date_dim, range: trailing 30 day, semiadditive: last}]` |
+| `moving_sum([m], N, -1, [d])` | `expr: SUM(m)` + `window: [{order: date_dim, range: trailing N day, semiadditive: last}]` (default/exclusive) |
+| `moving_sum([m], N-1, 0, [d])` | `expr: SUM(m)` + `window: [{order: date_dim, range: trailing N day inclusive, semiadditive: last}]` |
+| `moving_average([m], 30, -1, [d])` | `expr: AVG(m)` + `window: [{order: date_dim, range: trailing 30 day, semiadditive: last}]` |
 
-#### Leading Window (`range: leading N unit`) — PENDING LIVE VERIFICATION (2026-07)
+**Note:** `moving_sum([m], N, 0, [d])` (anchor-inclusive, the form previously
+mismapped to plain `trailing N day`) translates to `range: trailing (N+1) day
+inclusive`, not `trailing N day` — adjust N accordingly when translating this
+direction.
 
-The current YAML reference documents `range` with **five** values —
-`current | cumulative | trailing <N> <unit> | leading <N> <unit> | all` — plus an
-`inclusive|exclusive` anchor-row modifier (default `exclusive`). `leading` is the
-look-ahead counterpart to `trailing`. No live round-trip has verified the
-ThoughtSpot equivalent; do not ship this translation without one.
+#### Leading Window (`range: leading N unit`)
 
-| Databricks MV YAML | Candidate ThoughtSpot formula | Status |
-|---|---|---|
-| `window: [{order: date_dim, range: leading 7 day, semiadditive: last}]` | `moving_sum ( [m] , 0 , 7 , [date] )` (look_ahead=7, window_size=0) | PENDING — see BL-032 |
+`range` has **five** values — `current | cumulative | trailing <N> <unit> |
+leading <N> <unit> | all` — plus an `inclusive|exclusive` anchor-row modifier
+(default `exclusive`, applying only to `trailing`/`leading`). `leading` is the
+look-ahead counterpart to `trailing`.
 
-#### All-Partition Window (`range: all`) — PENDING LIVE VERIFICATION (2026-07)
+**Corrected 2026-07-09 (matrix C3).** The candidate previously listed here
+(`moving_sum([m], 0, 7, [date])`) is **wrong** — it always includes the anchor row
+(spans N+1 rows: anchor + N following) and matches neither the `exclusive` nor
+`inclusive` DBX form.
+
+| Databricks MV YAML | ThoughtSpot formula |
+|---|---|
+| `window: [{order: date_dim, range: leading 7 day, semiadditive: last}]` (default/exclusive) | `moving_sum ( [m] , -1 , 7 , [date] )` |
+| `window: [{order: date_dim, range: leading 7 day inclusive, semiadditive: last}]` | `moving_sum ( [m] , 0 , 6 , [date] )` |
+| `window: [{order: date_dim, range: leading N day, semiadditive: last}]` (default/exclusive) | `moving_sum ( [m] , -1 , N , [date] )` |
+| `window: [{order: date_dim, range: leading N day inclusive, semiadditive: last}]` | `moving_sum ( [m] , 0 , N-1 , [date] )` |
+
+**Live-verified 2026-07-09** — see
+`docs/audit/2026-07-08-dbx-window-claim-matrix.md` (C3).
+
+**Density caveat (E1)** — same as the Rolling Window section above: row-positional:
+matches Databricks' date-interval trailing/leading windows only when the order
+column is dense at the window's unit grain (one row per unit, no gaps) — see
+docs/audit/2026-07-09-dbx-semantic-claim-matrix.md (E1).
+
+#### All-Partition Window (`range: all`)
 
 `range: all` spans the entire partition, unbounded in both directions — not a
-bounded rolling window like `trailing`/`leading`. No documented ThoughtSpot
-equivalent has been verified; a partition-wide `group_aggregate(...)` (the same
-LOD mechanism as `AGG() OVER (PARTITION BY ...)` — see the LOD section below) is
-the leading candidate but is untested against this specific construct. Log as
-Unmapped Report until verified — see BL-032.
+bounded rolling window like `trailing`/`leading`. Confirmed **scoped per query
+partition** (e.g. per category), not table-wide.
 
-#### Anchor-Row Modifier (`inclusive` | `exclusive`) — PENDING RE-VERIFICATION (2026-07)
+| Databricks MV YAML | ThoughtSpot formula | Column type |
+|---|---|---|
+| `window: [{order: date_dim, range: all}]`, partitioned by `cat` | `group_aggregate ( sum ( [m] ) , { [cat] } , query_filters ( ) )` | **ATTRIBUTE** — see LOD section below |
+
+The partition-wide `group_aggregate(...)` is the same LOD mechanism as
+`AGG() OVER (PARTITION BY ...)` — see the LOD section below.
+
+**Live-verified 2026-07-09** — see
+`docs/audit/2026-07-08-dbx-window-claim-matrix.md` (C4): matched DBX exactly at
+both row grain and category grain.
+
+**Filter asymmetry caveat (A1/A2)** — because this mapping shares the LOD
+mechanism above, it inherits the same DBX-side asymmetry: filter-aware for a
+Databricks MV's own global `filter:`, filter-blind for an ad hoc query-time
+`WHERE` on an MV with no global `filter:` — see the LOD Functions section above
+and `docs/audit/2026-07-09-dbx-semantic-claim-matrix.md` (A1/A2).
+
+#### Anchor-Row Modifier (`inclusive` | `exclusive`)
 
 `trailing`/`leading` ranges accept an `inclusive|exclusive` modifier controlling
-whether the anchor (current) row is included in the window. **Documented default:
-`exclusive`** (Runtime 18.1 + YAML 1.1; DBSQL 2026.10 preview, release note
-2026-03-26). The `trailing N day` ↔ `moving_sum([m], N, 0, [date])` equivalence
-in the tables above was recorded before this default was confirmed and needs
-re-verification against a live instance — tracked in BL-032.
+whether the anchor (current) row is included in the window. The modifier applies
+**only** to `trailing`/`leading` — `current`, `cumulative`, and `all` do not
+accept it. **Confirmed default: `exclusive`** (Runtime 18.1 + YAML 1.1; DBSQL
+2026.10 preview, release note 2026-03-26) — confirmed live 2026-07-08:
+`trailing N day` == `trailing N day exclusive` at all 24 fixture rows.
+
+The `trailing N day` ↔ `moving_sum([m], N, 0, [date])` equivalence recorded in
+the tables above before 2026-07-09 was **wrong** for the reason given at the top
+of this section — the corrected forms are in the Rolling Window and Leading
+Window tables above.
+
+**Live-verified 2026-07-09** — see
+`docs/audit/2026-07-08-dbx-window-claim-matrix.md` (C1, C2, C3).
 
 ### Rank Functions
 
@@ -366,6 +430,37 @@ column becomes a `dimensions[]` entry (not a measure), using
 | `expr: COUNT(x) OVER (PARTITION BY dim)` | `group_aggregate(count([x]), {[dim]}, query_filters())` |
 | `expr: AVG(x) OVER (PARTITION BY d1, d2)` | `group_aggregate(average([x]), {[d1], [d2]}, query_filters())` |
 
+**Live-verified 2026-07-09** (see `docs/audit/2026-07-09-dbx-semantic-claim-matrix.md`,
+A1/A2) — the ThoughtSpot side is **CONFIRMED**: `query_filters()` makes this LOD
+respect user-applied filters under both a query-level pin and a model-level
+`filters:` block. **Cross-platform asymmetry:** this equivalence with the Databricks
+`OVER (PARTITION BY ...)` form holds only when the filter is applied as the MV's own
+global `filter:` block. A Databricks consumer applying an ad hoc query-time `WHERE`
+on an MV with no global `filter:` gets a filter-**blind** LOD dimension (the `WHERE`
+prunes output rows only, never the window's computed value) — no `query_filters()`
+form on the ThoughtSpot side reproduces that DBX-side behavior. Document this as a
+DBX-side asymmetry when converting either direction, not as a translation defect.
+
+**A3 follow-up, live-verified 2026-07-09** (see
+`docs/audit/2026-07-09-dbx-semantic-claim-matrix.md`, A3) — that asymmetry **is
+reproducible** after all, using a different third argument. `group_aggregate`'s
+filter argument also accepts the documented empty-set literal `{}`
+(`thoughtspot-formula-patterns.md`): `group_aggregate(sum(x), {dim}, {})` is
+**blind to a search-level/query-time filter** (matches DBX's ad hoc query-time
+`WHERE`-blind reading) but **still respects a model-level `filters:` block**
+(matches DBX's own MV-global-`filter:`-aware reading). So the refined mapping is:
+
+| ThoughtSpot construct | Reproduces (DBX-side) |
+|---|---|
+| `group_aggregate(sum(x), {dim}, query_filters())`, no model-level filter | An MV's global `filter:` (default mapping, simpler formula) |
+| `group_aggregate(sum(x), {dim}, {})` + a model-level `filters:` block mirroring the MV's `filter:` | Both halves of the DBX composite: MV-`filter:`-aware AND ad hoc query-time-`WHERE`-blind |
+
+A candidate subtraction form, `query_filters() - { [TABLE::col] }`, was
+import-accepted on the TS side but did not exclude a filter pinned on a *derived*
+boolean formula built from that column (the query-filter provenance tracks the
+filtered column, not its underlying physical dependency) — recorded as a live
+finding, not a working alternative to `{}`.
+
 ---
 
 ## Cross-Measure References (verified 2026-05-25)
@@ -389,24 +484,32 @@ expressions using `MEASURE()` and `ANY_VALUE()`.
 | `ANY_VALUE(dimension_name)` | `[dimension_name]` |
 | `MEASURE(a) / ANY_VALUE(b)` | `[a] / [b]` |
 
+**Live-verified 2026-07-09 across query grain** (see
+`docs/audit/2026-07-09-dbx-semantic-claim-matrix.md`, B1) — **CONFIRMED**: this
+inlining computes true ratio-of-sums, cross-platform, at every grain tested
+(fine/coarse/total). No sum-of-ratios or average-of-ratios divergence found — no
+formula change or grain caveat is needed.
+
 ---
 
-## Semi-Additive / Period-Filter Functions (verified 2026-05-26)
+## Semi-Additive / Period-Filter Functions
 
 Databricks MV measures with a `window` field use the `semiadditive` property.
 The ThoughtSpot translation depends on the `order:` dimension type:
 
 - **`order:` is a raw date** (snapshot metric — inventory, account balance) →
   **`last_value`/`first_value`** — takes the last/first observation in each period.
+  **Live-verified 2026-07-09** — see `docs/audit/2026-07-08-dbx-window-claim-matrix.md` (C7).
 - **`order:` is a truncated period dimension** (flow metric — revenue, quantity) →
-  **`sum_if` filter pattern** — filters to a specific period using `diff_months`,
-  `diff_quarters`, or `diff_years`. This is a conditional aggregate, not a window function.
+  **row-relative `moving_sum` LAG idiom** (see "Corrected 2026-07-09" below) — a true
+  window function, not a conditional aggregate.
 - **`range: cumulative`** → **`cumulative_sum`** — a true window function.
+  **Live-verified 2026-07-09** — matrix C5.
 
 **How to classify:** Look up the `order:` dimension's `expr` in the MV YAML.
 If the expr is a direct column reference or `date_trunc('day', ...)`, it's a raw
-date → `last_value`. If it uses `date_trunc('month'/'quarter'/'year', ...)`, it's
-a truncated period → `sum_if`.
+date → `last_value`/`first_value`. If it uses `date_trunc('month'/'quarter'/'year', ...)`,
+it's a truncated period → the row-relative `moving_sum` idiom below.
 
 ### True Semi-Additive (snapshot metrics)
 
@@ -424,33 +527,60 @@ a truncated period → `sum_if`.
 | `window: [{order: raw_date, semiadditive: last, range: current}]` | `last_value(sum([m]), query_groups(), {[date]})` | `order:` is a raw date dimension |
 | `window: [{order: raw_date, semiadditive: first, range: current}]` | `first_value(sum([m]), query_groups(), {[date]})` | `order:` is a raw date dimension |
 
+**Live-verified 2026-07-09** — see
+`docs/audit/2026-07-08-dbx-window-claim-matrix.md` (C7). `last` was reconfirmed
+and `first` was exercised live for the first time in this repo; both matched DBX
+exactly at category grain.
+
+**Live-verified 2026-07-09 under a query-time date-range filter** (see
+`docs/audit/2026-07-09-dbx-semantic-claim-matrix.md`, D1) — **CONFIRMED
+cross-platform**: `last_value`/`first_value` and the equivalent Databricks
+`window:` measure both collapse to the last/first observation *within the
+filtered range* under a query-level date-range pin, identical values at every row
+including the single-surviving-row edge case. No formula change needed.
+
 ### Period Filter (flow/additive metrics)
+
+**Corrected 2026-07-09 — row-relative, not wall-clock (matrix C6/C6a,
+`docs/audit/2026-07-08-dbx-window-claim-matrix.md`).** The mapping previously
+documented here (`sum_if(diff_months/quarters/years([date], today())=N, [m])`) is
+**wrong**: live testing (Query B1, a 3-hypothesis discriminator) proved
+`range: current` + `offset` is evaluated **relative to each output row's own
+period**, not anchored to wall-clock `today()`. Querying a "prior month" measure
+across a multi-month trend returns a `LAG`-style shift for every row, not a
+fixed-calendar-month filter — the old mapping only coincidentally matched a
+single current-period snapshot query and fails for any query spanning more than
+one period. `range: current` with **no** offset is simply the per-period
+aggregate (`sum([m])` at the query grain) under either reading.
+
+**Caveat:** the `moving_sum` LAG idiom below is exact only when the query returns
+exactly **one row per period** in the `order:` dimension. General use (gaps or
+multiple rows per period) needs a period-grain pre-aggregation first.
 
 #### TS → Databricks
 
 | ThoughtSpot | Databricks MV YAML | Notes |
 |---|---|---|
-| `sum_if(diff_months([date], today()) = 0, [m])` | `expr: SUM(m)` + `window: [{order: month_dim, range: current, semiadditive: last}]` | Current month |
-| `sum_if(diff_quarters([date], today()) = 0, [m])` | `expr: SUM(m)` + `window: [{order: quarter_dim, range: current, semiadditive: last}]` | Current quarter |
-| `sum_if(diff_months([date], today()) = -1, [m])` | `expr: SUM(m)` + `window: [{order: month_dim, semiadditive: last, range: current, offset: -1 month}]` | Previous month |
-| `sum_if(diff_quarters([date], today()) = -1, [m])` | `expr: SUM(m)` + `window: [{order: quarter_dim, semiadditive: last, range: current, offset: -3 month}]` | Previous quarter |
-| `sum_if(diff_months([date], today()) = -12, [m])` | `expr: SUM(m)` + `window: [{order: month_dim, semiadditive: last, range: current, offset: -1 year}]` | Same month last year |
-| `sum_if(diff_years([date], today()) = -1, [m])` | `expr: SUM(m)` + `window: [{order: year_dim, semiadditive: last, range: current, offset: -1 year}]` | Previous year |
+| `sum(m)` at month/quarter/year grain | `expr: SUM(m)` + `window: [{order: month_dim, range: current, semiadditive: last}]` | Current period, no offset |
+| `moving_sum([m], 1, -1, [date])` | `expr: SUM(m)` + `window: [{order: month_dim, semiadditive: last, range: current, offset: -1 month}]` | Previous month (LAG(1)) — Live-verified 2026-07-09 |
+| `moving_sum([m], 1, -1, [date])` | `expr: SUM(m)` + `window: [{order: quarter_dim, semiadditive: last, range: current, offset: -3 month}]` | Previous quarter (LAG(1) at quarter grain) — Deferred (C8), not separately live-tested |
+| `moving_sum([m], 12, -12, [date])` | `expr: SUM(m)` + `window: [{order: month_dim, semiadditive: last, range: current, offset: -1 year}]` | Same month last year (LAG(12)) — Deferred (C8), not separately live-tested at N=12 |
+| `moving_sum([m], 1, -1, [date])` | `expr: SUM(m)` + `window: [{order: year_dim, semiadditive: last, range: current, offset: -1 year}]` | Previous year (LAG(1) at year grain) — Deferred (C8), not separately live-tested |
 
-**Growth % formulas (MoM, YoY)** inline the `sum_if` expressions directly — no
+**Growth % formulas (MoM, YoY)** inline both period expressions directly — no
 cross-formula references needed:
 
 ```
 // MoM growth %
 safe_divide(
-  sum_if(diff_months([date], today()) = 0, [m]) - sum_if(diff_months([date], today()) = -1, [m]),
-  sum_if(diff_months([date], today()) = -1, [m])
+  sum([m]) - moving_sum([m], 1, -1, [date]),
+  moving_sum([m], 1, -1, [date])
 ) * 100
 
 // YoY growth % (month grain)
 safe_divide(
-  sum_if(diff_months([date], today()) = 0, [m]) - sum_if(diff_months([date], today()) = -12, [m]),
-  sum_if(diff_months([date], today()) = -12, [m])
+  sum([m]) - moving_sum([m], 12, -12, [date]),
+  moving_sum([m], 12, -12, [date])
 ) * 100
 ```
 
@@ -458,11 +588,18 @@ safe_divide(
 
 | Databricks MV YAML | ThoughtSpot formula | Notes |
 |---|---|---|
-| `window: [{range: current}]`, `order:` is truncated month | `sum_if(diff_months([date], today()) = 0, [m])` | Current period filter |
-| `window: [{range: current}]`, `order:` is truncated quarter | `sum_if(diff_quarters([date], today()) = 0, [m])` | Current quarter filter |
-| `window: [{range: current, offset: -1 month}]` | `sum_if(diff_months([date], today()) = -1, [m])` | Previous month |
-| `window: [{range: current, offset: -3 month}]`, quarter grain | `sum_if(diff_quarters([date], today()) = -1, [m])` | Previous quarter |
-| `window: [{range: current, offset: -1 year}]`, month grain | `sum_if(diff_months([date], today()) = -12, [m])` | Same month last year |
+| `window: [{range: current}]`, `order:` is truncated month/quarter/year | `sum([m])` at the query grain | Current period, no offset |
+| `window: [{range: current, offset: -1 month}]` | `moving_sum([m], 1, -1, [date])` | Previous month (LAG(1)) — **Live-verified 2026-07-09** |
+| `window: [{range: current, offset: -3 month}]`, quarter grain | `moving_sum([m], 1, -1, [date])` | Previous quarter — Deferred (C8), not separately live-tested at quarter grain |
+| `window: [{range: current, offset: -1 year}]`, month grain | `moving_sum([m], 12, -12, [date])` | Same month last year — Deferred (C8), not separately live-tested |
+
+**Live-verified 2026-07-09** — see
+`docs/audit/2026-07-08-dbx-window-claim-matrix.md` (C6, C6a). Verified for N=1:
+`moving_sum([m], 1, -1, [date])` matched DBX's prior-period value exactly at
+every row, including the out-of-range `NULL` at the earliest row (no "prior"
+period exists yet). N=12 (`-1 year` at month grain) and the quarter/year-grain
+rows are the documented extrapolation of the same verified idiom — flagged as
+deferred (C8) rather than separately live-tested.
 
 ### Cumulative
 
@@ -471,14 +608,21 @@ safe_divide(
 | TS → Databricks | `cumulative_sum(m, d)` | `expr: SUM(m)` + `window: [{order: d, semiadditive: last, range: cumulative}]` |
 | Databricks → TS | `window: [{range: cumulative}]` | `cumulative_sum([m], [d])` |
 
+**Live-verified 2026-07-09** — see
+`docs/audit/2026-07-08-dbx-window-claim-matrix.md` (C5): matched DBX's running
+total at every row of the fixture.
+
 ### Key rules
 
 - `semiadditive` is REQUIRED when `window` is present. Using `window`
   without `semiadditive` fails with `Missing required creator property 'semiadditive'`.
-- **Classify by `order:` dimension type**: raw date → `last_value`; truncated period →
-  `sum_if`. The `order:` dimension's `expr` in the MV YAML tells you which.
-- The `offset` shifts the period anchor: `-1 month` = previous month,
-  `-1 year` at month grain = -12 months (use `diff_months(...) = -12`).
+- **Classify by `order:` dimension type**: raw date → `last_value`/`first_value`;
+  truncated period → the row-relative `moving_sum` LAG idiom. The `order:`
+  dimension's `expr` in the MV YAML tells you which.
+- The `offset` shifts the period anchor by a row count N (offset value ÷ the
+  `order:` dimension's own period size — `-1 month` at month grain = N=1;
+  `-1 year` at month grain = N=12): `moving_sum([m], N, -N, [date])`. This is
+  **row-relative**, not wall-clock — see "Corrected 2026-07-09" above.
 - `range: cumulative` remains a true window function (`cumulative_sum`).
 
 ---
@@ -571,6 +715,13 @@ formula equivalents:
 | `MEASURE(a) / ANY_VALUE(b)` | `[a] / [b]` — cross-measure ratio |
 | `(SELECT ... FROM ...)` | **Untranslatable** — subquery; log in Unmapped Report |
 
+**LOD row above (A1/A2) and cross-measure/ratio rows (B1)** — see the fuller LOD
+Functions and Cross-Measure References sections earlier in this file for the
+live-verified 2026-07-09 caveat/citation (`docs/audit/2026-07-09-dbx-semantic-claim-matrix.md`):
+the LOD row's filter-awareness holds for a Databricks MV's own global `filter:`
+only, not for a consumer's ad hoc query-time `WHERE`; the cross-measure/ratio rows
+are CONFIRMED cross-platform at every grain, no caveat needed.
+
 ### Implementation Notes
 
 **Date literals with hyphens:** A bare `'2024-05-01'` in a ThoughtSpot formula is parsed
@@ -586,7 +737,7 @@ the `=` is left orphaned and the formula breaks.
 **`moving_sum` / `moving_average` — no nested aggregates:** ThoughtSpot window functions
 (`moving_sum`, `moving_average`, `cumulative_sum`) already aggregate internally. Do NOT
 wrap `sum()` or `average()` inside them. Strip the outer aggregate and pass the raw
-column expression: `moving_sum([col], N, 0, [date])`, not `moving_sum(sum([col]), N, 0, [date])`.
+column expression: `moving_sum([col], N, -1, [date])`, not `moving_sum(sum([col]), N, -1, [date])`.
 
 **`count(distinct col)` — use `unique count`:** ThoughtSpot does not support `count(distinct ...)`.
 Always express a distinct count as a **`formulas[]` entry** with `unique count ( [col] )` (with a
