@@ -1,4 +1,4 @@
-connection: "snowflake_csa"
+connection: "my_connection"
 include: "views/*.view.lkml"
 
 explore: order_fact {
