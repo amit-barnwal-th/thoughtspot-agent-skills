@@ -2725,28 +2725,73 @@ live-verification pass.
 
 **Source:** 2026-07-10 BL-063 PR4 final whole-branch review.
 **Affects:** `ts_cli/commands/tml.py:478`, `ts_cli/commands/dependency.py:468`,
-`ts_cli/commands/tables.py:187`; `ts_cli/databricks/mv_build_model.py`
-(`_check_no_duplicate_formula_names`, `build_columns_and_formulas`).
-**Status:** OPEN.
+`ts_cli/commands/tables.py:187` (flat-GUID sites); `ts_cli/databricks/mv_build_model.py`
+(`_check_no_duplicate_display_names`); `ts_cli/databricks/mv_parse.py`
+(`duplicate_name` guard).
+**Status:** SHIPPED (BL-063 PR5, ts-cli v0.45.0, 2026-07-10).
 
-1. The flat import-response shape (`resp[0].response.header.id_guid`,
-   live-verified 2026-07-10) is parsed only by `extract_imported_guid`
+1. **SHIPPED** — the flat import-response shape (`resp[0].response.header.id_guid`,
+   live-verified 2026-07-10) was parsed only by `extract_imported_guid`
    (`ts_cli/tableau/build_model.py`). The nested-only sites `commands/tml.py:478`,
    `commands/dependency.py:468`, and `commands/tables.py:187` still read only
-   `response.object[0].header.id_guid` and silently fall back to slower/degraded
-   paths (name search, "no GUID" branches) when a caller hits the flat shape.
-   Migrate them to the shared helper, or add the same flat-shape fallback inline.
-2. `_check_no_duplicate_formula_names` (`mv_build_model.py`) covers `formulas[]`
-   only — it does not extend to all `columns[]` display names. Two dimensions
-   with identical `display_name` emit duplicate column names that `ts tml lint`'s
-   I8 (unique `column_id`) can't catch, because `column_id` and display `name`
-   are different fields.
-3. `parse-mv` has no name-uniqueness guard: duplicate MV identifiers across
-   `dimensions` + `measures` would double-emit via the `mv_name`-keyed lookups
+   `response.object[0].header.id_guid` and silently fell back to slower/degraded
+   paths (name search, "no GUID" branches) when a caller hit the flat shape.
+   Fixed by relocating the helper to `ts_cli/tml_common.py` and importing
+   `extract_imported_guid` from there at all three sites — `tml.py`, `dependency.py`,
+   and `tables.py` now share the one flat-shape-aware parser.
+2. **SHIPPED** — `_check_no_duplicate_formula_names` (`mv_build_model.py`) covered
+   `formulas[]` only — it did not extend to all `columns[]` display names. Two
+   dimensions with identical `display_name` emit duplicate column names that
+   `ts tml lint`'s I8 (unique `column_id`) can't catch, because `column_id` and
+   display `name` are different fields. Fixed by `_check_no_duplicate_display_names`
+   in `ts_cli/databricks/mv_build_model.py`, which checks display-title collisions
+   across every `columns[]` entry (dimensions and measures alike).
+3. **SHIPPED** — `parse-mv` had no name-uniqueness guard: duplicate MV identifiers
+   across `dimensions` + `measures` would double-emit via the `mv_name`-keyed lookups
    in `build_columns_and_formulas` (`physical_by_mv`/`formula_by_mv`, last-write-wins).
    Theoretical only — Databricks rejects duplicate dimension/measure names at
-   `CREATE VIEW ... WITH METRICS` time — but worth a defensive check if the
-   parser is ever fed a hand-edited or partially-applied YAML.
+   `CREATE VIEW ... WITH METRICS` time — but defensive against hand-edited or
+   partially-applied YAML. Fixed by a `duplicate_name` entry appended to
+   `unsupported[]` in `ts_cli/databricks/mv_parse.py` when a dimension/measure
+   name repeats.
 
 **Target:** fold into BL-063 PR 5, or take as a standalone ts-cli fix — no fixed
-calendar date.
+calendar date. **Closed** — all three items shipped in BL-063 PR5 (ts-cli v0.45.0).
+
+## BL-100 — Bring the remaining converters up to the Databricks-from standard
+
+**Filed:** 2026-07-11 (post BL-063 Phase 2 close-out).
+**Source:** user-raised after reviewing what `agents/shared/mappings/` is for now that
+`ts databricks parse-mv / translate-formulas / build-model` codified the from-Databricks
+direction.
+**Status:** OPEN — deliberately sequenced AFTER the next full repo audit, whose angle 11
+(agentic → deterministic) and external sweep will inventory/scope the exact mechanical
+steps per converter and refresh the currency baseline this work builds on.
+
+The from-Databricks direction now sets the bar: (a) **deterministic codification** — the
+mechanical parse → translate → assemble-TML pipeline runs as pure ts-cli code with golden
+fixtures, the LLM handling only the judgment residue (`unsupported[]`/`skipped[]`, review
+steps); (b) **empirical semantic verification** — claim-matrix deep-dives with live
+fixture number-matching on both platforms (BL-063 PR1/PR1.5 pattern), findings recorded
+in the mapping docs with citation-rich currency anchors; (c) **runtime vendoring** where
+a runtime can't call ts-cli (Genie `build_mv_lib` concatenation pattern).
+
+Per-converter gap against that bar:
+
+| Converter | Codification | Empirical verification | Notes |
+|---|---|---|---|
+| ts-convert-from-snowflake-sv | **None** (only `ts snowflake diff`/`lint-ddl`) | Partial — 2026-07-10 SE-cluster formula-composition/TML-import batch, but no per-construct claim matrix | Biggest gap; BL-063's original title named Snowflake too. Mirror the Databricks 3-command pipeline (`parse-sv` / `translate-formulas` / `build-model`). CoCo mirror keeps the doc-driven path (no shell) — docs stay authoritative for it. |
+| ts-convert-to-snowflake-sv | None | Inaugural anchor only (2026-06, never swept) | DDL emission is highly mechanical — strong codification candidate. |
+| ts-convert-to-databricks-mv | None | Window emission tables live-verified (PR1) | MV YAML emission is mechanical; reuse `mv_*` module vocabulary in reverse. |
+| ts-convert-from-tableau | **Done** (full `ts tableau` pipeline) | Doc-driven sweeps only — no fixture number-match has ever run | Only the fidelity leg is missing; needs live Tableau Server access (often unavailable — see feedback memory). Scope as opportunistic. |
+
+Also in scope: normalize currency-anchor style (the Databricks anchors have outgrown
+"context" into changelog territory; the anchor format is `platform — YYYY-MM (context)` —
+long-form evidence belongs in `docs/audit/` claim matrices, referenced from the anchor).
+
+**Relationship to angle 15 (conversion fidelity, PARKED):** the empirical-verification
+leg of this item is a per-converter unparking of angle 15 — coordinate rather than
+duplicate.
+
+**Target:** scope after the next full repo audit (angle 11 output feeds the plan);
+Snowflake-from pipeline is the natural first program (BL-063-style phased PRs).

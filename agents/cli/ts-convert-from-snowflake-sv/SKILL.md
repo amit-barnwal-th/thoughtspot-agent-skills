@@ -1334,10 +1334,20 @@ where it causes an import error).
 > | Looks untranslatable | Actually translatable as |
 > |---|---|
 > | `SUM(col)` + `NON ADDITIVE BY (date ASC NULLS LAST)` | `last_value ( sum ( [col] ) , query_groups ( ) , { [date_col] } )` |
-> | `SUM(m) OVER (PARTITION BY dim1, dim2)` | `group_sum ( measure, dim1, dim2 )` |
-> | `SUM(m) OVER (PARTITION BY EXCLUDING dim1)` | `group_aggregate ( sum(m), query_groups()-{dim1}, query_filters() )` |
-> | `DIV0(tbl.metric, SUM(tbl.metric) OVER (PARTITION BY dim.COL))` | `safe_divide ( sum(m), group_sum(m, dim) )` — contribution ratio |
-> | `SUM(m) OVER (PARTITION BY EXCLUDING dim ORDER BY dim ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` | `cumulative_sum ( measure, dim )` |
+> | `SUM(m) OVER (PARTITION BY dim1, dim2)` | `group_sum ( [T::col] , [T::dim1] , [T::dim2] )` — column ref only, no nested aggregates |
+> | `SUM(m) OVER (PARTITION BY EXCLUDING dim1)` | `group_aggregate ( sum([T::col]), query_groups()-{[T::dim1]}, query_filters() )` |
+> | `DIV0(tbl.metric, SUM(tbl.metric) OVER (PARTITION BY dim.COL))` | `safe_divide ( sum([T::col]), group_sum([T::col], [T::dim]) )` — contribution ratio |
+> | `SUM(m) OVER (ORDER BY date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` | `moving_sum ( group_aggregate(sum([T::col]), {[T::PK]}, query_filters()) , -1 , 0 , [T::order_col] )` |
+> | Same — simple column, no inner aggregate | `cumulative_sum ( [T::col] , [T::order_col] )` — when source is a raw column |
+>
+> **ThoughtSpot formula function nesting rules (CRITICAL):**
+> - **Group functions** (`group_sum`, `group_count`, `group_average`, `group_max`, `group_min`, `group_unique_count`) are **shorthand** for `group_aggregate`:
+>   - `group_sum(sales, category)` = `group_aggregate(sum(sales), {category}, query_filters())`
+>   - `group_max(orderDate, dim)` = `group_aggregate(max(orderDate), {dim}, query_filters())`
+> - All group functions return a **row-level scalar**. They CANNOT be nested inside each other.
+> - **Window functions** (`cumulative_sum`, `cumulative_average`, `moving_sum`, `moving_average`, etc.) accept group function output as their input (scalar in → windowed scalar out).
+> - You CANNOT place raw aggregates (`sum(...)`, `count(...)`) directly inside window functions — wrap in `group_aggregate` first.
+> - All `if()` conditions require parentheses: `if ( condition ) then ... else ...`
 >
 > Consult the reference. Never reason from first principles about SQL window functions.
 
@@ -1387,10 +1397,12 @@ in the expression. Use the Identifier Resolution Algorithm in
 **Window metrics referencing metrics (GAP-13):** when a window function metric
 (e.g. `SUM(...) OVER (ORDER BY ... ROWS BETWEEN ...)`) references another metric
 in its base expression, resolve the inner metric first:
-- If the inner metric is a simple `AGG(col)`: inline the aggregation directly:
-  `cumulative_sum(count([TABLE::col]), [TABLE::order_col])`
-- Do NOT wrap in `group_aggregate` — cumulative/moving functions already handle
-  the aggregation grain internally.
+- If the inner metric is a simple `AGG(col)`: wrap in `group_aggregate` and pass to
+  the window function:
+  `moving_sum(group_aggregate(count([TABLE::col]), {[TABLE::PK]}, query_filters()), -1, 0, [TABLE::order_col])`
+- You CANNOT place aggregates directly inside `moving_sum` / `cumulative_sum` —
+  always use `group_aggregate` as the bridge.
+- For raw columns (no aggregation needed): `cumulative_sum([TABLE::col], [TABLE::order_col])`
 
 For each metric whose `EXPR` is not a simple `AGG(table.col)` (after applying identifier resolution above — references have been resolved or the metric has been translated via double aggregation):
 
@@ -1571,28 +1583,13 @@ and column summary so the user has the full picture before importing.
 
 ---
 
-#### Pre-import validation gate (`ts tml lint` — I1 / I2 / I4 / I5 / I8)
+#### Pre-import validation gate
 
-Before running `ts tml import`, lint the generated **Model** TML with **`ts tml lint`** — a
-parser-based check of the hard invariants in
-[`../../shared/schemas/ts-model-conversion-invariants.md`](../../shared/schemas/ts-model-conversion-invariants.md)
-that `--policy VALIDATE_ONLY` does **not** catch (ThoughtSpot accepts the TML and then
-behaves wrong, or rejects it on import):
-
-- **I1** — every `formulas[]` entry has a paired `columns[]` entry (`formula_id:` == `id:`). *(Unpaired formula silently dropped.)*
-- **I2** — no `aggregation:` inside any `formulas[]` entry. *(Raises "FORMULA is not a valid aggregation type".)*
-- **I4** — every `model_tables[]` `id:` (when present) equals its `name:`. *(Mismatch makes joins silently fail.)*
-- **I5** — no physical-column `aggregation: COUNT_DISTINCT`; use a `unique count ( [TABLE::col] )` formula. *(Silently flips MEASURE → ATTRIBUTE.)*
-- **I8** — no duplicate `column_id` across `columns[]`. *(Hard import rejection: "columns should have unique column_id values".)*
-
-`ts tml lint` reads the same stdin shape as `ts tml import` and exits non-zero on any
-finding, so it gates the import (replace `<file>`):
-
-```bash
-python3 -c "import json,pathlib; print(json.dumps([pathlib.Path('<file>').read_text()]))" | ts tml lint
-```
-
-Do not import until it reports `"clean": true`. Fix any finding and re-lint.
+Before any `ts tml import`, run the mandatory lint gate — see
+[`../../shared/schemas/ts-tml-import-gate.md`](../../shared/schemas/ts-tml-import-gate.md)
+for the invariant list (I1/I2/I4/I5/I8), the stdin command, and the
+update-vs-create `guid` and import-policy rules. Do not import until
+`ts tml lint` reports `"clean": true`.
 
 ---
 
@@ -1646,12 +1643,6 @@ print(result.stdout)
 if result.returncode != 0:
     print(result.stderr)
 ```
-
-**Import policy:** Use `--policy PARTIAL` when importing multiple models in a batch.
-`ALL_OR_NONE` rolls back the **entire** batch if any single TML fails — including
-models that parsed and imported successfully. The response still returns success GUIDs
-for the rolled-back models, making the failure silent. Use `ALL_OR_NONE` only for
-atomic pairs (one table + one model that references it).
 
 On success, parse the response JSON to extract the created model's GUID. **Save it** —
 required for any future reimports to update the model without creating a duplicate.
@@ -1835,6 +1826,8 @@ Model in one pass through Steps 4–13.
 
 | Version | Date | Summary |
 |---|---|---|
+| 1.15.0 | 2026-07-11 | Formula function-composition rules (group_* = group_aggregate shorthand; no nesting group functions; raw aggregates must wrap in group_aggregate before window functions; if() conditions require parentheses) + refined cumulative/moving_sum mapping rows. Companion shared-reference additions: Function Composition Rules + if() parens (thoughtspot-formula-patterns.md), cumulative reverse-translation decision table + COUNT_IF table (ts-snowflake-formula-translation.md), TML Import Behaviours (ts-from-snowflake-rules.md). Verified on SE cluster via TML import (Payroll Test Model). |
+| 1.14.1 | 2026-07-10 | Pre-import lint gate + import-policy text extracted to shared `ts-tml-import-gate.md` (BL-063 PR5) — content unchanged, now linked. |
 | 1.14.0 | 2026-07-10 | Cumulative window metrics: row 25 corrected to `moving_sum(group_aggregate(...))` (aggregates cannot nest directly in `moving_sum`); new `COUNT_IF` mapping; new limitations L6 (BOOL in `if` requires parentheses — prefer `count_if`/`sum_if`) and L7 (formulas referencing `[TABLE::COL]` fail on initial CREATE — documented mandatory two-pass import in Step 11). Verified on SE cluster. |
 | 1.13.0 | 2026-07-03 | Step C3 change-set computation delegates to `ts snowflake diff` (BL-063 quick win). Prereq ts-cli v0.30.0. |
 | 1.12.0 | 2026-06-17 | Step 6B connection step now offers **E — use existing / C — create a new connection** (Snowflake, key-pair auth via `ts connections create`) instead of only selecting an existing one. Adds the "Database does not exist in connection → role can't see it → create one" guidance and a credential-handling guardrail (private key by file path only; never pasted into chat; password/OAuth → UI + E path). Mirrors the connection-step change in ts-convert-from-tableau; ts-convert-from-databricks-mv gets the explicit stop-and-instruct fallback. |
