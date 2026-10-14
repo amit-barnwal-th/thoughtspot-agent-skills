@@ -264,3 +264,86 @@ def test_latest_date_check_wants_int_epoch_near_today():
     assert K.classify(c, OK_GEN, ok_fetch([[today, 1.0]]), {})[0] == K.AS_DOCUMENTED
     assert K.classify(c, OK_GEN, ok_fetch([["2026-10-14", 1.0]]), {})[0] == K.CHANGED
     assert K.classify(c, OK_GEN, ok_fetch([[today - 30 * 86400, 1.0]]), {})[0] == K.CHANGED
+
+
+# ---- the guards suite ----------------------------------------------------------------------
+
+def guard(**kw):
+    base = dict(id="g", sql="DELETE FROM t", expect=K.GEN_ERROR, row="🛡 writes", model="apparel", guard=True)
+    base.update(kw)
+    return K.Case(**base)
+
+
+def test_guards_are_their_own_suite_and_never_fetch():
+    gs = [c for c in CASES if c.guard]
+    assert gs and all(c.suite == "guards" and not c.runs_fetch for c in gs)
+    assert all(c.expect in (K.GEN_ERROR, K.SQL_OK) for c in gs)
+
+
+def test_validate_rejects_a_guard_that_would_fetch():
+    assert any("never fetched" in p for p in K.validate_cases([guard(expect=K.OK)]))
+
+
+def test_rejected_write_is_as_documented_whatever_the_status():
+    assert K.classify(guard(), err("QUERY_GEN_ERROR"), None, {})[0] == K.AS_DOCUMENTED
+    assert K.classify(guard(), err("SOME_NEW_CODE"), None, {})[0] == K.AS_DOCUMENTED
+
+
+def test_a_write_that_compiles_is_a_breach_not_a_change():
+    gen = dict(OK_GEN, executable_sql="DELETE FROM t")
+    v, reasons = K.classify(guard(), gen, None, {})
+    assert v == K.BREACH and "SELECT/WITH" in reasons[0]
+
+
+def test_neutralised_input_must_compile_to_one_read_only_select():
+    c = guard(expect=K.SQL_OK)
+    assert K.classify(c, dict(OK_GEN, executable_sql="SELECT a FROM t LIMIT 100000"), None, {})[0] == K.AS_DOCUMENTED
+    for bad in ("SELECT a FROM t; DROP TABLE t", "SELECT a FROM t -- x", "SELECT a INTO b FROM t"):
+        assert K.classify(c, dict(OK_GEN, executable_sql=bad), None, {})[0] == K.BREACH, bad
+    assert K.classify(c, err("QUERY_GEN_ERROR"), None, {})[0] == K.CHANGED  # rejected outright: safe, but news
+
+
+def test_keywords_inside_literals_and_identifiers_are_not_writes():
+    assert K.read_only_problem("SELECT \"UPDATE\" FROM t WHERE x = 'a''; drop table y; --'") is None
+    assert K.read_only_problem("SELECT a FROM t ORDER BY a OFFSET 1") is None
+    assert K.read_only_problem("WITH x AS (SELECT 1) SELECT * FROM x") is None
+
+
+# ---- guard hardening (reviewer findings on #606) --------------------------------------------
+
+def test_guard_control_failure_is_error_not_a_pass():
+    # a broken endpoint: the control (a valid SELECT) does not compile -> ERROR, run is untrustworthy
+    ctl = guard(id="g_ctl", expect=K.SQL_OK, control=True, sql="SELECT 1")
+    assert K.classify(ctl, err("UNKNOWN"), None, {})[0] == K.ERROR
+    assert K.classify(ctl, OK_GEN, None, {})[0] == K.AS_DOCUMENTED
+
+
+def test_rejection_that_carries_unsafe_sql_is_a_breach():
+    # a non-SUCCESS response that still hands back a write is a breach, not a pass
+    gen = {"status": "QUERY_GEN_ERROR", "executable_sql": "DELETE FROM t", "errors": []}
+    assert K.classify(guard(), gen, None, {})[0] == K.BREACH
+
+
+def test_shipped_guards_include_a_control():
+    gs = [c for c in CASES if c.guard]
+    assert any(c.control for c in gs), "guards suite has no positive control"
+
+
+def test_backslash_and_dollar_quote_cannot_smuggle_a_statement():
+    # Snowflake backslash escape: the ; DROP is inside the string, so this is one SELECT
+    assert K.read_only_problem("SELECT a FROM t WHERE x = 'y\\'; DROP TABLE z; --'") is None
+    # dollar-quoted string hides its contents
+    assert K.read_only_problem("SELECT a FROM t WHERE x = $$p; DROP TABLE z$$") is None
+    # but a real second statement outside any quote is still caught
+    assert K.read_only_problem("SELECT a FROM t $$x$$ ; DELETE FROM t")
+
+
+def test_nextval_and_system_functions_are_flagged():
+    assert K.read_only_problem("SELECT seq.NEXTVAL AS n FROM t")
+    assert K.read_only_problem("SELECT SYSTEM$ABORT_SESSION(1) FROM t")
+
+
+def test_non_string_executable_sql_is_a_problem_not_a_crash():
+    assert K.read_only_problem(["SELECT 1"])  # list, not str
+    gen = {"status": "SUCCESS", "executable_sql": ["oops"], "errors": []}
+    assert K.classify(guard(expect=K.SQL_OK), gen, None, {})[0] == K.BREACH

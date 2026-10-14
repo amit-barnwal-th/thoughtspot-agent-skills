@@ -8,6 +8,10 @@ whether the cluster still behaves that way:
 - CHANGED        the behaviour moved. Either direction is news: a ❌ row that now works is a
                  fix to confirm and document, a ✅ row that now fails is a regression
 - ERROR          the run could not tell (CLI/auth failure, or a control it depends on broke)
+- BREACH         a `guard` case (a write, DDL or injection attempt) compiled to something
+                 other than one read-only SELECT. Not news to document: a safety regression
+                 to raise immediately. Guards never call fetch-data, so nothing reaches the
+                 warehouse even then
 
 A status is never trusted on its own. Constructs whose failure mode is a wrong number
 carry a control case or a value check, because they return SUCCESS either way.
@@ -15,12 +19,14 @@ carry a control case or a value check, because they return SUCCESS either way.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 AS_DOCUMENTED = "AS_DOCUMENTED"
 CHANGED = "CHANGED"
 ERROR = "ERROR"
+BREACH = "BREACH"
 
 # What the case expects of the two calls.
 OK = "ok"                    # generate-sql and fetch-data both SUCCESS
@@ -49,15 +55,75 @@ class Case:
     values: tuple = ()                        # ((row, col, expected), ...) — floats compared with tolerance
     check: Optional[Check] = field(default=None, compare=False)  # bespoke rule: (rows, results) -> problem or None
     control: bool = False                     # a control only: reported, but backs no row on its own
+    guard: bool = False                       # must stay rejected / read-only forever; never fetched
 
     @property
     def suite(self) -> str:
-        """`lessons` cases back learning-path.md on the sample Model; the rest back limitations.md."""
+        """`guards` must never change; `lessons` back learning-path.md; the rest back limitations.md."""
+        if self.guard:
+            return "guards"
         return "lessons" if self.model == "apparel" else "limitations"
 
     @property
     def runs_fetch(self) -> bool:
-        return self.expect in (OK, FETCH_ERROR)
+        return self.expect in (OK, FETCH_ERROR) and not self.guard
+
+
+_WRITE_WORDS = re.compile(
+    r"(?<![\w$])("
+    r"insert|update|delete|merge|truncate|drop|create|alter|grant|revoke|call|copy|put|get|list|"
+    r"remove|undrop|describe|desc|show|execute|exec|begin|commit|rollback|use|into|set|nextval"
+    r"|system\$\w*)"
+    r"(?![\w$])")
+
+
+def strip_literals(sql: str) -> str:
+    """Blank out every quoted string and identifier so a keyword inside a value is never read
+    as SQL. Handles ANSI doubled quotes (''), backslash escapes (\'), `$$ dollar quoting $$`
+    and `backtick identifiers` — so neither a backslash dialect nor dollar quoting can smuggle
+    a statement terminator or keyword past the scan. An unterminated quote blanks to end."""
+    out, i, n = [], 0, len(sql)
+    while i < n:
+        c = sql[i]
+        if c == "$" and sql.startswith("$$", i):            # $$ ... $$
+            end = sql.find("$$", i + 2)
+            i = n if end == -1 else end + 2
+            continue
+        if c in ("'", '"', "`"):                            # quoted string / identifier
+            i += 1
+            while i < n:
+                d = sql[i]
+                if d == "\\" and i + 1 < n:                 # backslash escape
+                    i += 2
+                    continue
+                if d == c:
+                    if i + 1 < n and sql[i + 1] == c:        # doubled = escaped quote
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def read_only_problem(sql) -> Optional[str]:
+    """None when `sql` is one read-only SELECT (optionally led by WITH); else what is wrong."""
+    if not isinstance(sql, str):
+        return f"executable_sql is not a string: {type(sql).__name__}"
+    body = strip_literals(sql).strip().lower()
+    if not body:
+        return "no SQL"
+    if not re.match(r"(select|with)\b", body):
+        return f"does not start with SELECT/WITH: {body[:40]!r}"
+    if ";" in body.rstrip(";"):
+        return "contains more than one statement"
+    if "--" in body or "/*" in body or "#" in body:
+        return "carries a comment through to the warehouse"
+    hit = _WRITE_WORDS.search(body)
+    return f"contains {hit.group(1).upper()!r} outside a literal" if hit else None
 
 
 def _norm(v):
@@ -134,6 +200,9 @@ def classify(case: Case, gen: Optional[dict], fetch: Optional[dict], results: di
         return ERROR, [f"generate-sql did not run: {_first_error(gen) or gen}"]
     g = _status(gen)
 
+    if case.guard:
+        return _classify_guard(case, gen, g)
+
     if case.expect == GEN_ERROR:
         if g == "SUCCESS":
             return CHANGED, ["now compiles (generate-sql SUCCESS) — documented as rejected"]
@@ -170,6 +239,36 @@ def classify(case: Case, gen: Optional[dict], fetch: Optional[dict], results: di
         case.values or case.same_as or case.differs_from or case.check) else "works"])
 
 
+def _classify_guard(case: Case, gen: dict, g: str) -> tuple:
+    # A guard CONTROL is a plain valid SELECT: it must compile. If it does not, the endpoint
+    # is unusable (auth/wrong-model/down) and every "rejected" guard below would pass for the
+    # wrong reason — so a failed control is ERROR, which makes the whole run untrustworthy.
+    if case.control:
+        if g != "SUCCESS":
+            return ERROR, [f"guard control did not compile ({g}: {_first_error(gen)}) — "
+                           "endpoint unusable, so guard rejections prove nothing"]
+        problem = read_only_problem(gen.get("executable_sql"))
+        return (ERROR, [f"guard control is not read-only: {problem}"]) if problem else (AS_DOCUMENTED, ["control compiles"])
+
+    carried = read_only_problem(gen.get("executable_sql")) if gen.get("executable_sql") else None
+
+    if case.expect == GEN_ERROR:
+        if g == "SUCCESS":
+            return BREACH, [f"now compiles: {carried or 'to a SELECT, but it must be rejected'}"]
+        # Rejected — but a non-SUCCESS response that still carries unsafe SQL is a breach.
+        if carried:
+            return BREACH, [f"rejected ({g}) but response carries unsafe SQL: {carried}"]
+        return AS_DOCUMENTED, [f"rejected: {g}"]
+
+    # SQL_OK guard: compiling is expected; the output must be one read-only SELECT.
+    if g != "SUCCESS":
+        return CHANGED, [f"now rejected outright ({g}) — still safe; update the note"]
+    if carried:
+        return BREACH, [carried]
+    shape = _shape_problems(case, gen)   # a shape change is news, not a safety breach
+    return (CHANGED, shape) if shape else (AS_DOCUMENTED, ["compiles to one read-only SELECT"])
+
+
 def validate_cases(cases) -> list:
     """Structural problems in the case list itself — run before any live call."""
     ids = [c.id for c in cases]
@@ -188,4 +287,6 @@ def validate_cases(cases) -> list:
             out.append(f"{c.id}: value checks need expect={OK}")
         if not c.row.strip():
             out.append(f"{c.id}: no limitations.md row named")
+        if c.guard and c.expect not in (GEN_ERROR, SQL_OK):
+            out.append(f"{c.id}: a guard may only expect {GEN_ERROR} or {SQL_OK} (it is never fetched)")
     return out

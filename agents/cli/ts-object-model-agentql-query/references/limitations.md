@@ -142,6 +142,37 @@ caught at compile time (see ⚠️ table above), and an outer aggregation over a
 fails (see ❌). On builds older than jul.26.mt expect the previous ORDER BY / LIMIT and
 aggregated-branch behaviour.
 
+## 🛡 Read-only by design — must stay rejected
+
+Unlike the rows above, these are **not limitations waiting for a fix**: AgentQL is a
+read-only query interface, and every statement below must stay refused. Each is checked by
+the retest suite's `guards` cases (`run.py --suite guards`), which only call `generate-sql`,
+so nothing is sent to the warehouse. **If one ever compiles to anything but a single
+read-only `SELECT`, the run reports BREACH: raise it as a security issue. Never "move it
+to ✅".** The guarantee covered here is **no writes and no DDL**; it is not a claim that a
+`SELECT` can only read the Model's own tables (see the note below the table).
+
+| Input | Result (✓ live 2026-10-14, 26.9.0.cl PROD) |
+|---|---|
+| `DELETE` · `UPDATE` · `INSERT` (values or select) · `MERGE` · `TRUNCATE` · `DROP` · `CREATE` (incl. `CREATE … AS SELECT`) · `ALTER TABLE` · `GRANT` · `CALL` · `USE` | rejected at compile: *"Only SELECT queries are supported for deserialization"* |
+| `COPY INTO` · `ALTER SESSION` · `PUT`/`GET`/`LIST` · `UNDROP` · `EXECUTE IMMEDIATE` · `SHOW`/`DESCRIBE` | rejected at parse (unsupported statement) |
+| A write inside a CTE (`WITH d AS (DELETE …)`) | rejected: `UNSUPPORTED_CONDITION`, *"CTE query must be a SELECT statement"* |
+| A second statement after `;` (`SELECT …; DELETE …`) | rejected at parse: *"Unexpected clause"* |
+| A physical table name **in `FROM`** | rejected: `TABLE_NOT_FOUND` — the outer `FROM` must be the Model |
+| `-- ; DROP …` or `/* ; DELETE … */` comments | **compiles, neutralised:** the warehouse SQL is regenerated as one `SELECT`; the comment is not in it |
+| `SELECT … INTO newtab` | **compiles, neutralised:** the `INTO` is dropped, leaving a plain `SELECT` |
+| `'x''; DROP TABLE y; --'` inside a string literal | **compiles, neutralised:** it stays a quoted value in the filter |
+
+**Scope of "read-only".** This covers the *statement type*: AgentQL will not write or run
+DDL. It is **not** a guarantee that a `SELECT` reads only the Model's tables — a `SELECT`
+can reference other warehouse objects, so the warehouse connection's own grants remain the
+real boundary for what data a query can reach. How far a `SELECT` can reach, and whether
+Model-level security always applies to it, is tracked separately and deliberately not
+enumerated here.
+
+Read-only here means AgentQL itself. The warehouse connection's own grants are a separate
+control, and they still matter.
+
 ## Not bugs — feature requests and security behaviour
 
 - Run AgentQL directly on **tables** (not just Models) — [SCAL-319871](https://thoughtspot.atlassian.net/browse/SCAL-319871) (Open)
@@ -153,7 +184,9 @@ aggregated-branch behaviour.
 
 ## Maintaining this file
 
-When you re-probe a ❌/⚠️ row and it now works, **move it to ✅** with the date and build,
+**Run the retest suite first** (`tools/agentql-retest/run.py`; see its README): it re-probes every row
+and lists only those whose behaviour moved. A ❌ case that reports CHANGED ("now compiles") is
+an improvement that has shipped. When you re-probe a ❌/⚠️ row and it now works, **move it to ✅** with the date and build,
 and relax the matching rule in `agentql-rules.md` / `udf-reference.md` / `patterns.md`, then
 bump the currency anchor at the top. When you hit a new failure, check it against
 [SCAL-316371](https://thoughtspot.atlassian.net/browse/SCAL-316371) first — it's probably
