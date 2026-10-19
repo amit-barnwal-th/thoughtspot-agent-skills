@@ -88,6 +88,9 @@ learner needs no profile and no Model, and there is no per-lesson tool cost.
 - For a *break it* lesson, **section 4** shows the captured `status` and error.
 - **Section 6 (Results)** shows taught values, not live rows. Say so once up front, so nobody
   mistakes a taught figure for a fresh one (the sample's rolling `date` moves dated totals anyway).
+- A few lessons are **illustrative** (and labelled so): where the sample Model can't show a
+  feature — RLS, a custom calendar, non-default join types — the lesson carries its
+  representative SQL **inline**, clearly marked, instead of a live capture.
 
 The whole reference library is also bundled as one document,
 [`agentql-offline.md`](agentql-offline.md), for reading end to end. *(Want fresh numbers against
@@ -649,12 +652,75 @@ lesson's own runs are the check.
 
 ### 3.5 Security you never write
 
-No query here mentions security, and none needs to. If the Model has **row-level security**,
-the compiled SQL includes the user's filter automatically, so two users running the same
-AgentQL can get different rows, each correct for them. Column-level security hides columns
-the same way. Read [`architecture.md`](architecture.md) § "What the semantic layer
-guarantees". This is the strongest argument for AgentQL over raw SQL, and the sample Model
-has no RLS to demonstrate it.
+No query here mentions security, and none needs to. If the Model carries **row-level security
+(RLS)**, ThoughtSpot injects the user's filter into the compiled SQL automatically — so two
+users running the *same* AgentQL get different rows, each correct for them. The agent never
+writes the filter and cannot remove it. Read [`architecture.md`](architecture.md) § "What the
+semantic layer guarantees".
+
+The sample Model has no RLS rule, so the blocks below are **illustrative** (not live captures).
+Assume the rule is on the **fact** table. The clearest test is a **dimension-only** question —
+*"list all stores"* — because whether the fact is touched at all now depends on the RLS mode.
+
+**Strict RLS (recommended).** The rule is on one table (the fact), and ThoughtSpot **always
+forces the join to it in** — even for a question that only needs the stores dimension. So
+*"list all stores"* still joins the fact and applies the filter, and the AgentQL **cannot remove
+that join**:
+```sql
+SELECT "ta_2"."STORE" "ca_1"
+FROM "…"."FACT_SALES" "ta_1"
+  JOIN "…"."DIM_STORES" "ta_2" ON "ta_1"."STOREID" = "ta_2"."STOREID"
+WHERE ("ta_1"."_TENANT_ID" IN (2200539748))
+GROUP BY "ta_2"."STORE"
+LIMIT 100000
+```
+The fact join is there **only** to carry the RLS filter — so every query is scoped, even one
+that never asked for a measure.
+
+**Non-strict RLS.** Only the tables the question needs are included, so RLS applies per table —
+which makes *which tables you secure* a deliberate design choice:
+
+- **Secure the fact only** — appropriate when only sales-level data is sensitive. Any query that
+  includes sales is filtered, but *"list all stores"* touches just the stores table, so it has no
+  fact join and returns **all** stores:
+```sql
+SELECT "ta_1"."STORE" "ca_1"
+FROM "…"."DIM_STORES" "ta_1"
+GROUP BY "ta_1"."STORE"
+LIMIT 100000
+```
+
+- **Secure the store table too** — when store membership itself must be restricted. The same
+  *"list all stores"* is then filtered on the store table directly:
+```sql
+SELECT "ta_1"."STORE" "ca_1"
+FROM "…"."DIM_STORES" "ta_1"
+WHERE ("ta_1"."_TENANT_ID" IN (2200539748))
+GROUP BY "ta_1"."STORE"
+LIMIT 100000
+```
+
+With rules on more than one table, a query that joins them carries the predicate on each — e.g.
+*"sales by store"* with rules on both fact and stores:
+```sql
+… FROM "…"."FACT_SALES" "ta_1"
+  JOIN "…"."DIM_STORES" "ta_2" ON "ta_1"."STOREID" = "ta_2"."STOREID"
+WHERE (
+  ("ta_1"."_TENANT_ID" IN (2200539748))
+  AND ("ta_2"."_TENANT_ID" IN (2200539748))
+)
+GROUP BY "ta_2"."STORE"
+LIMIT 100000
+```
+
+**Key Findings.** The `_TENANT_ID IN (…)` predicate is **injected by the RLS rule** — the agent
+never wrote it and can't remove it; the tenant id comes from the user's context. The mode decides
+*reach*: **strict RLS forces the secured table's join into every query**, so one rule on the fact
+scopes even a dimension-only question; **non-strict** filters only the tables a query includes, so
+you place rules by what must be protected — the fact for sales-level data, and any dimension (like
+store) whose membership must also be restricted. Either way security lives in the Model, applied at
+compile time — the strongest argument for AgentQL over hand-written SQL. (Column-level security
+hides columns the same way.)
 
 ### 3.6 Every product, including the ones with no sales — and the business rules in the SQL
 
