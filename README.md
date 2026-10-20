@@ -106,7 +106,7 @@ and when to reach for it, see [skill personas](docs/skill-personas.md).
 
 | Skill | What it does | CLI | Snowsight | DBX |
 |---|---|:-:|:-:|:-:|
-| [`ts-object-model-agentql-query`](agents/cli/ts-object-model-agentql-query/SKILL.md) | Query a Model with AgentQL — write Semantic SQL, validate to warehouse SQL, execute, and review results. New to AgentQL? Ask for the [**guided course**](agents/cli/ts-object-model-agentql-query/references/learning-path.md) ("teach me AgentQL"), or read [**Why AgentQL**](agents/cli/ts-object-model-agentql-query/references/architecture.md). | [✓](agents/cli/ts-object-model-agentql-query/SKILL.md) | — | — |
+| [`ts-object-model-agentql-query`](agents/cli/ts-object-model-agentql-query/SKILL.md) | Query a Model with AgentQL — write Semantic SQL, validate to warehouse SQL, execute, and review results. New to AgentQL? Ask for the [**guided course**](agents/cli/ts-object-model-agentql-query/references/learning-path.md) ("teach me AgentQL"), play [**AgentQL Quest**](https://thoughtspot.github.io/thoughtspot-agent-skills/agentql-quest/) in your browser, or read [**Why AgentQL**](agents/cli/ts-object-model-agentql-query/references/architecture.md). | [✓](agents/cli/ts-object-model-agentql-query/SKILL.md) | — | — |
 
 </details>
 
@@ -210,7 +210,8 @@ thoughtspot-agent-skills/
     ├── smoke-tests/ — End-to-end smoke tests requiring live credentials
     ├── ossie-roundtrip/ — Round-trips real Models through the Apache Ossie converter (lives upstream)
     ├── formula-fidelity/ — Checks translated formulas return the source's values (oracle vs ThoughtSpot, live)
-    └── agentql-retest/ — Re-probes every documented AgentQL limitation and reports the rows whose behaviour moved (live)
+    ├── agentql-retest/ — Re-probes every documented AgentQL limitation and reports the rows whose behaviour moved (live)
+    └── agentql-quest/  — AgentQL Quest, the Learn AgentQL course as a browser game, built from the captured lesson SQL and published to GitHub Pages
 ```
 
 ---
