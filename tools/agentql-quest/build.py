@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build AgentQL Quest, the browser game for the Learn AgentQL course.
 
-Joins two sources into one self-contained `index.html`:
+Joins two sources into the game's data, `quest.json`, and one self-contained `index.html`:
 
   - `references/lesson-sql.md` of the ts-object-model-agentql-query skill: the AgentQL and
     the warehouse SQL ThoughtSpot generated for each lesson, captured live and committed.
@@ -10,17 +10,20 @@ Joins two sources into one self-contained `index.html`:
     who put each one there, and the text the player reads.
 
 The data and the fonts are written into the page rather than shipped beside it, so the file
-makes no outside requests and runs from GitHub Pages, any static host, or a double-click.
+makes no outside requests and runs from GitHub Pages, any static host, or a double-click. The same
+data is also written beside the page as `quest.json`, the contract `quest.schema.json` describes,
+so another front end can play the same checked content without parsing the YAML or the capture.
 
-    python3 tools/agentql-quest/build.py                   # write tools/agentql-quest/dist/index.html
-    python3 tools/agentql-quest/build.py --out _site/index.html
+    python3 tools/agentql-quest/build.py                   # write tools/agentql-quest/dist/
+    python3 tools/agentql-quest/build.py --out _site/index.html   # quest.json and its schema land beside it
     python3 tools/agentql-quest/build.py --check           # validate only (tools/validate/check_agentql_quest.py)
 
 Fails when an encounter no longer matches the capture or the course: a lesson or Module the
-text names that the course no longer has, a missing or rejected case, AgentQL
-that differs by more than layout, an `sql` line that is no longer in the SQL exactly, or an
-`sql_count` that no longer holds. A recapture that changes what a lesson teaches therefore
-breaks the build instead of quietly teaching something false.
+text names that the course no longer has, a missing or rejected case, AgentQL that differs by
+more than layout, an `sql` line that is no longer in the SQL exactly, an `sql_count` that no
+longer holds, or a capture header that names a different Model from the one the AgentQL queries;
+or when the data no longer fits `quest.schema.json`. A recapture that changes what a lesson
+teaches therefore breaks the build instead of quietly teaching something false.
 """
 from __future__ import annotations
 
@@ -39,6 +42,9 @@ LESSON_SQL = ROOT / "agents/cli/ts-object-model-agentql-query/references/lesson-
 LEARNING_PATH = ROOT / "agents/cli/ts-object-model-agentql-query/references/learning-path.md"
 ENCOUNTERS = HERE / "encounters.yaml"
 TEMPLATE = HERE / "game.html"
+SCHEMA = HERE / "quest.schema.json"
+SCHEMA_VERSION = 1
+BESIDE = ("quest.json", "quest.schema.json")  # written next to the page, so --out may not name them
 FONT_DIR = HERE / "fonts"
 DEFAULT_OUT = HERE / "dist" / "index.html"
 PLACEHOLDER = "__QUEST_DATA__"
@@ -73,6 +79,12 @@ def parse_lesson_sql(text: str) -> tuple[str | None, dict[str, dict]]:
         ok = "`status: SUCCESS`" in block and len(blocks) > 1
         cases[cid] = {"agentql": blocks[0] if blocks else "", "sql": blocks[1] if ok else None}
     return date, cases
+
+
+def parse_capture_model(text: str) -> str | None:
+    """The Model the capture was taken on, from the header's "captured live on the sample Model **`…`**"."""
+    m = re.search(r"captured\s+live\s+on\s+the\s+sample\s+Model\s+\*\*`([^`]+)`\*\*", text)
+    return m.group(1).strip() if m else None
 
 
 def _norm(sql: str) -> str:
@@ -289,9 +301,15 @@ def _halls(r: dict, engines: dict, rid: str, errors: list[str]) -> list[dict]:
     return halls
 
 
-def compile_quest(doc: dict, date: str | None, cases: dict[str, dict]) -> tuple[dict, list[str]]:
-    """Turn encounters.yaml plus the capture into the game's data. Returns (data, errors)."""
+def compile_quest(doc: dict, date: str | None, cases: dict[str, dict],
+                  model: str | None) -> tuple[dict, list[str]]:
+    """Turn encounters.yaml plus the capture into the game's data. Returns (data, errors).
+
+    `model` is the Model the capture's header names (see parse_capture_model)."""
     errors: list[str] = []
+    model = (model or "").strip()
+    if not model:
+        errors.append("lesson-sql.md: no Model named in its header")
     who = doc.get("who_options") or {}
     missing = [k for k in WHO_ORDER if not who.get(k)]
     if missing:
@@ -307,6 +325,10 @@ def compile_quest(doc: dict, date: str | None, cases: dict[str, dict]) -> tuple[
         built = _encounter(e, n, who, engines, cases, errors)
         if built:
             by_case[built["case"]] = built
+            # The dragon's caption names the header's Model: it must be the one this AgentQL queries.
+            if model and not re.search(rf'\bFROM\s+"{re.escape(model)}"', cases[built["case"]]["agentql"], re.I):
+                errors.append(f"{built['case']}: the capture header names Model {model!r}, "
+                              f"but this AgentQL does not query FROM \"{model}\"")
 
     realms, used, ids = [], set(), set()
     for r in doc.get("realms") or []:
@@ -317,8 +339,9 @@ def compile_quest(doc: dict, date: str | None, cases: dict[str, dict]) -> tuple[
         for field in ("name", "covers", "depth", "minutes"):
             if not r.get(field):
                 errors.append(f"realm {rid}: missing {field}")
-        if not isinstance(r.get("module"), int):
-            errors.append(f"realm {rid}: module must be a number")
+        for field in ("module", "minutes"):  # whole numbers, never 4.0: strict decoders reject a float
+            if not isinstance(r.get(field), int) or isinstance(r.get(field), bool):
+                errors.append(f"realm {rid}: {field} must be a whole number")
         halls = _halls(r, engines, rid, errors)
         trials = [t for h in halls for t in h["trials"]]
         enc_ids = list(r.get("encounters") or [])
@@ -356,7 +379,160 @@ def compile_quest(doc: dict, date: str | None, cases: dict[str, dict]) -> tuple[
             errors.append(f"route {rt.get('who')!r}: needs who and a path of realm ids (unknown: {bad})")
         routes.append({"who": rt.get("who", ""), "path": rt.get("path") or []})
 
-    return {"captured": date, "realms": realms, "routes": routes}, errors
+    return {"schema_version": SCHEMA_VERSION, "captured": date, "model": model,
+            "realms": realms, "routes": routes}, errors
+
+
+# The JSON Schema keywords quest.schema.json may use. Pre-commit needs no extra package for this;
+# CI also validates the published pair with the real jsonschema (see the README). lint_schema
+# checks the schema first, whole, and accepts only a strict form of 2020-12 that _check enforces
+# exactly; the README lists what it refuses.
+_SCHEMA_NOTES = {"$schema", "$id", "title", "description", "$defs"}
+_SCHEMA_RULES = {"type", "enum", "required", "properties", "additionalProperties", "items",
+                 "minItems", "anyOf", "$ref"}
+_DIALECT = "https://json-schema.org/draft/2020-12/schema"
+_DEF_NAME = re.compile(r"[A-Za-z0-9_]+")  # nothing JSON Pointer (~ /) or a URI (%) would decode
+_JSON_TYPES = {"object": dict, "array": list, "string": str, "integer": int, "boolean": bool,
+               "null": type(None)}
+
+
+def lint_schema(node, root: dict, where: str = "#") -> list[str]:
+    """Problems with the schema itself: anything check_schema could not enforce exactly."""
+    def bad(msg: str) -> list[str]:
+        return [f"quest.schema.json {where}: {msg}"]
+    if not isinstance(node, dict):
+        return bad("every schema must be an object (boolean schemas are not supported)")
+    unknown = set(node) - _SCHEMA_NOTES - _SCHEMA_RULES
+    if unknown:
+        return bad(f"uses {sorted(unknown)}, which check_schema does not support")
+    errors: list[str] = []
+    for k in ("title", "description"):  # the metaschema types these too
+        if k in node and not isinstance(node[k], str):
+            errors += bad(f"{k} must be a string")
+    if node is root and node.get("$schema", _DIALECT) != _DIALECT:
+        errors += bad(f"$schema must be {_DIALECT!r}, the dialect check_schema follows")
+    if node is root and "$id" in node and not (isinstance(node["$id"], str) and re.fullmatch(r"[^#]*#?", node["$id"])):
+        errors += bad("$id must be a URI without a fragment")
+    if node is not root and {"$id", "$schema", "$defs"} & node.keys():
+        # $ref always resolves against the root's $defs, so nothing below may start a new scope.
+        errors += bad("$id, $schema and $defs are supported only at the root")
+    t = node.get("type")
+    if "type" in node and (not isinstance(t, str) or t not in _JSON_TYPES):
+        errors += bad(f"type {t!r} is not supported (one of {sorted(_JSON_TYPES)})")
+    if "additionalProperties" in node and node["additionalProperties"] is not False:
+        errors += bad("only additionalProperties: false is supported")
+    if t == "object" or {"properties", "required", "additionalProperties"} & node.keys():
+        # A front end relies on the shape: every field present, nothing unlisted. _check applies
+        # required and additionalProperties only beside properties, so none may appear alone.
+        if t != "object" or "properties" not in node or node.get("additionalProperties") is not False:
+            errors += bad("an object needs type: object, properties and additionalProperties: false")
+        if not isinstance(node.get("properties", {}), dict) or not isinstance(node.get("required", []), list) \
+                or not all(isinstance(k, str) for k in node.get("required", [])):
+            return errors + bad("properties must be an object and required a list of names")
+        if set(node.get("required", [])) != set(node.get("properties", {})):
+            errors += bad("every property must be required")
+        if len(set(node.get("required", []))) != len(node.get("required", [])):
+            errors += bad("required lists a name twice")
+    if "enum" in node and not isinstance(node["enum"], list):
+        errors += bad("enum must be a list")
+    if "minItems" in node and (not isinstance(node["minItems"], int) or isinstance(node["minItems"], bool)
+                               or node["minItems"] < 0):
+        errors += bad("minItems must be an integer, 0 or more")
+    if "$ref" in node:
+        ref, seen = node["$ref"], set()
+        defs = root.get("$defs") if isinstance(root.get("$defs"), dict) else {}
+        if not isinstance(ref, str) or not ref.startswith("#/$defs/") or ref[8:] not in defs:
+            errors += bad(f"unknown $ref {ref!r}")
+        else:
+            # A chain of $refs that comes back to itself never reaches a rule (and never ends).
+            while isinstance(ref, str) and ref.startswith("#/$defs/") and ref[8:] in defs and ref not in seen:
+                seen.add(ref)
+                ref = defs[ref[8:]].get("$ref") if isinstance(defs[ref[8:]], dict) else None
+            if ref in seen:
+                errors += bad(f"$ref {node['$ref']!r} refers back to itself")
+    for k, sub in (node.get("properties") or {}).items():
+        errors += lint_schema(sub, root, f"{where}/properties/{k}")
+    if "items" in node:
+        errors += lint_schema(node["items"], root, f"{where}/items")
+    if "anyOf" in node and not (isinstance(node["anyOf"], list) and node["anyOf"]):
+        return errors + bad("anyOf must be a non-empty list")
+    for i, sub in enumerate(node.get("anyOf") or []):
+        errors += lint_schema(sub, root, f"{where}/anyOf/{i}")
+    if node is root:
+        if not isinstance(node.get("$defs", {}), dict):
+            return errors + bad("$defs must be an object")
+        for k, sub in (node.get("$defs") or {}).items():
+            if not _DEF_NAME.fullmatch(k):
+                errors += bad(f"definition name {k!r}: use letters, digits and _ only")
+            errors += lint_schema(sub, root, f"#/$defs/{k}")
+            if _rechecks_itself(sub, node["$defs"], (f"#/$defs/{k}",)):
+                errors += bad(f"#/$defs/{k} reaches itself through $ref/anyOf without reading any deeper")
+    return errors
+
+
+def _rechecks_itself(node, defs: dict, stack: tuple) -> bool:
+    """True if checking `node` leads back to a definition on `stack` while still checking the same
+    value: through $ref and anyOf only (properties and items always move to a smaller value)."""
+    if not isinstance(node, dict):
+        return False
+    ref = node.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/$defs/") and ref[8:] in defs:
+        if ref in stack or _rechecks_itself(defs[ref[8:]], defs, stack + (ref,)):
+            return True
+    return any(_rechecks_itself(b, defs, stack) for b in node.get("anyOf") or [] if isinstance(node.get("anyOf"), list))
+
+
+def _same(a, b) -> bool:
+    """JSON equality: true and false are not 1 and 0, as they are to Python's ==."""
+    if isinstance(a, bool) or isinstance(b, bool):
+        return type(a) is type(b) and a == b
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b))
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(_same(a[k], b[k]) for k in a)
+    return a == b
+
+
+def _is_type(value, name: str) -> bool:
+    if isinstance(value, bool):
+        return name == "boolean"
+    if name == "integer":  # 2020-12: 1.0 is an integer
+        return isinstance(value, int) or (isinstance(value, float) and value.is_integer())
+    return isinstance(value, _JSON_TYPES[name])
+
+
+def check_schema(value, schema: dict) -> list[str]:
+    """Check `value` against quest.schema.json's subset of JSON Schema 2020-12."""
+    problems = lint_schema(schema, schema)
+    return problems or _check(value, schema, schema, "quest")
+
+
+def _check(value, schema: dict, root: dict, where: str) -> list[str]:
+    errors: list[str] = []
+    if "$ref" in schema:  # 2020-12: $ref applies alongside its siblings, it doesn't replace them
+        errors += _check(value, root["$defs"][schema["$ref"][8:]], root, where)
+    if "anyOf" in schema:
+        branches = [_check(value, s, root, where) for s in schema["anyOf"]]
+        if all(branches):
+            errors.append(f"{where}: matches none of its allowed shapes ({'; or '.join(b[0] for b in branches)})")
+    if "type" in schema and not _is_type(value, schema["type"]):
+        return errors + [f"{where}: expected {schema['type']}, got {type(value).__name__}"]
+    if "enum" in schema and not any(_same(value, e) for e in schema["enum"]):
+        errors.append(f"{where}: {value!r} is not one of {schema['enum']}")
+    if isinstance(value, dict) and "properties" in schema:
+        props = schema["properties"]
+        errors += [f"{where}: missing {k!r}" for k in schema.get("required", []) if k not in value]
+        errors += [f"{where}: {k!r} is not in quest.schema.json" for k in value if k not in props]
+        for k, v in value.items():
+            if k in props:
+                errors += _check(v, props[k], root, f"{where}.{k}")
+    if isinstance(value, list):
+        if len(value) < schema.get("minItems", 0):
+            errors.append(f"{where}: needs at least {schema['minItems']} item(s)")
+        if "items" in schema:
+            for i, v in enumerate(value):
+                errors += _check(v, schema["items"], root, f"{where}[{i}]")
+    return errors
 
 
 def parse_learning_path(text: str) -> tuple[set[str], dict[str, set[str]], dict[str, str]]:
@@ -438,13 +614,25 @@ def render(template: str, data: dict, fonts_css: str = "") -> str:
     return template.replace(PLACEHOLDER, payload).replace(FONT_PLACEHOLDER, fonts_css)
 
 
+def _not_json(name: str):
+    raise ValueError(f"quest.schema.json: {name} is not JSON (JSON.parse and strict parsers reject it)")
+
+
 def build(check: bool = False) -> tuple[str | None, dict, list[str]]:
     """Validate, and unless `check`, render. Returns (html or None, data, errors)."""
-    date, cases = parse_lesson_sql(LESSON_SQL.read_text(encoding="utf-8"))
+    capture = LESSON_SQL.read_text(encoding="utf-8")
+    date, cases = parse_lesson_sql(capture)
+    model = parse_capture_model(capture)
     raw = ENCOUNTERS.read_text(encoding="utf-8")
     doc = yaml.safe_load(raw) or {}
-    data, errors = compile_quest(doc, date, cases)
+    data, errors = compile_quest(doc, date, cases, model)
     errors += check_course_refs(raw, doc, *parse_learning_path(LEARNING_PATH.read_text(encoding="utf-8")))  # modules, lessons, titles
+    try:
+        schema = json.loads(SCHEMA.read_text(encoding="utf-8"), parse_constant=_not_json)
+    except ValueError as e:  # includes JSONDecodeError
+        errors.append(str(e) if str(e).startswith("quest.schema.json") else f"quest.schema.json: not valid JSON ({e})")
+    else:
+        errors += check_schema(data, schema)
     if errors:
         return None, data, errors
     fonts = font_faces()  # read even under --check, so a missing font file fails pre-commit too
@@ -454,14 +642,20 @@ def build(check: bool = False) -> tuple[str | None, dict, list[str]]:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out", default=str(DEFAULT_OUT), help="output HTML (default: tools/agentql-quest/dist/index.html)")
+    ap.add_argument("--out", default=str(DEFAULT_OUT),
+                    help="output HTML (default: tools/agentql-quest/dist/index.html); "
+                         "quest.json and quest.schema.json are written beside it")
     ap.add_argument("--check", action="store_true", help="validate only; write nothing")
     ap.add_argument("--root", help="accepted for parity with the other validators; paths resolve from this script")
     args = ap.parse_args(argv)
 
+    if pathlib.Path(args.out).name.casefold() in BESIDE:  # case-insensitive filesystems
+        print(f"agentql-quest: --out names the page; {pathlib.Path(args.out).name} is written beside it", file=sys.stderr)
+        return 2
     html, data, errors = build(check=args.check)
     if errors:
-        print("agentql-quest: encounters.yaml no longer matches lesson-sql.md:", file=sys.stderr)
+        print("agentql-quest: encounters.yaml no longer matches lesson-sql.md, the course or quest.schema.json:",
+              file=sys.stderr)
         for e in errors:
             print(f"  - {e}", file=sys.stderr)
         return 1
@@ -476,7 +670,9 @@ def main(argv: list[str] | None = None) -> int:
     out = pathlib.Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(html, encoding="utf-8")
-    print(f"agentql-quest: wrote {out} ({summary})")
+    out.with_name("quest.json").write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    out.with_name("quest.schema.json").write_text(SCHEMA.read_text(encoding="utf-8"), encoding="utf-8")
+    print(f"agentql-quest: wrote {out}, quest.json and quest.schema.json ({summary})")
     return 0
 
 

@@ -64,10 +64,11 @@ player's first click or key press.
 ## How it is built
 
 ```
-encounters.yaml ─┐
-lesson-sql.md ───┼─► build.py ─► index.html  (one self-contained file)
-game.html ───────┤
-fonts/ ──────────┘
+encounters.yaml ────┐                ┌─► quest.json         (the checked data, see "The data contract")
+lesson-sql.md ──────┤                │
+game.html ──────────┼─► build.py ────┼─► quest.schema.json  (a copy of the schema, where its $id points)
+fonts/ ─────────────┤                │
+quest.schema.json ──┘                └─► index.html         (one self-contained file, quest.json inside)
 ```
 
 - **`lesson-sql.md`** (in the skill's `references/`) is the only source of SQL: the AgentQL and
@@ -79,15 +80,51 @@ fonts/ ──────────┘
 - **`game.html`** is the page with `__QUEST_DATA__` and `/*__FONT_FACES__*/` placeholders.
   `build.py` writes the data and the fonts into it, so the page makes **no outside requests**
   and runs from Pages, any static host, or a double-click.
+- **`quest.schema.json`** describes `quest.json`; see below.
 - **`fonts/`** holds the Latin subsets of VT323 and IBM Plex Mono (Fontsource 5.3.0), with
   their SIL Open Font License files.
 
 ```bash
-python3 tools/agentql-quest/build.py                      # → tools/agentql-quest/dist/index.html
+python3 tools/agentql-quest/build.py                      # → tools/agentql-quest/dist/{index.html,quest.json,quest.schema.json}
 python3 tools/agentql-quest/build.py --check              # validate only
 python3 tools/validate/check_agentql_quest.py --root .    # the same, as pre-commit and CI run it
 pytest tools/agentql-quest/tests -q                       # includes a headless play-through (needs node)
 ```
+
+## The data contract
+
+`quest.json` is everything a front end needs to play the quest, already checked: the realms in
+map order, each hall's teaching and questions, and each encounter's business question, path
+choice, AgentQL, captured SQL (one string per line), scales and hoard rules, plus the Model and
+date of the capture. Pages publishes it at `/agentql-quest/quest.json`, next to the game, with
+its schema at `/agentql-quest/quest.schema.json`.
+
+[`quest.schema.json`](quest.schema.json) (JSON Schema) describes every field, and `build.py`
+checks its own output against it, so the PR gate fails when the data and the schema drift
+apart. Every field is required and nothing else is allowed, so a front end can rely on the
+shape. A new field goes into `build.py` and the schema in the same change (either alone fails
+the gate); bump `schema_version` for any change a front end would notice. The check is a small
+built-in one, so pre-commit needs no extra package. It checks the schema itself first, whole,
+and accepts only a small, strict form of JSON Schema 2020-12 that it can enforce exactly. It
+refuses:
+
+- a keyword it doesn't know, or a `$schema` other than 2020-12;
+- an object rule (`required`, `additionalProperties`) away from that object's `properties`;
+- an object that allows unlisted or optional fields, or lists a field twice;
+- `$id`, `$schema` or `$defs` below the root, and definition names other than letters, digits
+  and `_`;
+- a broken `$ref`, or one that reaches itself (directly, or through `anyOf`);
+- a schema file that isn't strict JSON (`NaN`, trailing commas).
+
+If you need a form it refuses, extend the checker and its tests first.
+
+CI also installs the real `jsonschema` (pinned in `validate.yml`) and validates the published
+`quest.json` against the published `quest.schema.json` the way a consumer's
+`jsonschema.validate()` would, metaschema included. Locally that test runs only if a jsonschema
+that supports 2020-12 (4.0 or later) is installed, and skips otherwise.
+
+So a question is edited in `encounters.yaml`, never in a front end, and a second front end
+(for example an explorable map) plays the same content by loading `quest.json`.
 
 ## When the build fails
 
@@ -101,6 +138,12 @@ pytest tools/agentql-quest/tests -q                       # includes a headless 
 | `no SQL line is exactly '…'` | a recapture changed that line of the generated SQL | re-read the new SQL; update the point, **and its lesson text if the behaviour moved** (a changed row cap or join type means the lesson is now wrong, not just the highlight) |
 | `expected '…' N time(s) in the SQL` | a whole-statement fact moved, e.g. the fact table is read twice (pruning off) | same: check whether the lesson still holds |
 | `match '…' hits no line` | a `scroll` substring no longer appears in the AgentQL | update `scroll` |
+| `lesson-sql.md: no Model named in its header` | the capture's header lost the "captured live on the sample Model" line | regenerate `lesson-sql.md` with `tools/agentql-retest/build_lesson_sql.py` |
+| `the capture header names Model '…', but this AgentQL does not query FROM "…"` | the header and the captured AgentQL disagree about the Model, so the caption would name the wrong one | recapture, or fix the generator's header |
+| `quest: …` or `quest.…: …`, for example `missing '…'`, `'…' is not in quest.schema.json`, `expected …, got …`, `… is not one of …`, `needs at least … item(s)`, `matches none of its allowed shapes (…)` | the built data no longer fits the contract (the path says where) | change `build.py` and the schema together |
+| `quest.schema.json #…: …` | the schema uses something the built-in check can't enforce | use only the supported forms the message names |
+| `quest.schema.json: not valid JSON (…)` or `… NaN is not JSON` | the schema file isn't strict JSON | fix the file; every JSON parser must read it |
+| `realm …: module must be a whole number` (or `minutes`) | a number like `4.0` | write `4` |
 
 ## Adding an encounter or opening a realm
 
