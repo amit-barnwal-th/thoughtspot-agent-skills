@@ -27,6 +27,7 @@ LEARNING_PATH = B.Pack("agentql").source("learning_path")
 CASE = "l3_all_products_left_join"
 EID = "every_product"  # the encounter whose case is CASE
 MODEL = "(Sample) Retail - Apparel"  # the Model lesson-sql.md's header names
+ART = B.classic_art(B.Pack("agentql"))[0]  # the pack's art/classic/, as the page reads it
 
 
 @pytest.fixture(scope="module")
@@ -70,7 +71,7 @@ def _built_encounters(data):
 def _built_html(doc, capture):
     data, errors = _compile(doc, capture)
     assert errors == []
-    return B.render(B.TEMPLATE.read_text(encoding="utf-8"), data, B.font_faces())
+    return B.render(B.TEMPLATE.read_text(encoding="utf-8"), data, B.font_faces(), ART)
 
 
 # ---- the committed content -------------------------------------------------------------------
@@ -587,7 +588,7 @@ def test_the_page_fails_its_play_through_without_a_model(doc, capture, tmp_path)
     assert errors == []
     data["meta"]["agentql_capture"]["model"] = ""
     page = tmp_path / "index.html"
-    page.write_text(B.render(B.TEMPLATE.read_text(encoding="utf-8"), data, B.font_faces()), encoding="utf-8")
+    page.write_text(B.render(B.TEMPLATE.read_text(encoding="utf-8"), data, B.font_faces(), ART), encoding="utf-8")
     r = subprocess.run(["node", str(HERE / "play_quest.js"), str(page)], capture_output=True, text=True)
     assert r.returncode != 0 and "should name the Model" in r.stdout + r.stderr
 
@@ -1431,7 +1432,7 @@ def test_the_page_saves_under_the_packs_key(doc, capture, tmp_path):
     assert errors == []
     data["pack"]["storage_key"] = "zz"
     page = tmp_path / "index.html"
-    page.write_text(B.render(B.TEMPLATE.read_text(encoding="utf-8"), data, B.font_faces()), encoding="utf-8")
+    page.write_text(B.render(B.TEMPLATE.read_text(encoding="utf-8"), data, B.font_faces(), ART), encoding="utf-8")
     r = subprocess.run(["node", str(HERE / "play_quest.js"), str(page)], capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
 
@@ -1667,3 +1668,357 @@ def test_adding_names_keeps_bom_and_indented_comments(tmp_path):
     D.add(["zqxvorn"], path)
     lines = path.read_text(encoding="utf-8").splitlines()
     assert lines[:2] == ["# header line one", "   # indented note"] and D.load(path) == {"c" * 20, D.digest("zqxvorn")}
+
+
+# ---- PR 2b: the classic page's wording and art come from the pack ------------------------------
+
+def test_the_page_carries_no_agentql_wording():
+    page = B.TEMPLATE.read_text(encoding="utf-8")
+    script = page.split("<script>", 1)[1]
+    for word in ("AgentQL", "ThoughtSpot", "Wizard", "Forge", "Dragon", "dragon", "Kingdom of Law", "Spotter", "merchant"):
+        assert word not in script, word
+    assert "AgentQL" not in page.split("<script", 1)[0].split("<style>")[0], "the head must come from the pack"
+
+
+def test_the_page_reads_both_sides_of_a_ternary_but_not_the_compared_value():
+    strings, art = B.classic_needs(B.TEMPLATE.read_text(encoding="utf-8"))
+    assert {"intro_claim", "intro_choice", "try_again", "foe_falls", "next_point", "sound_on", "sound_off"} <= strings
+    assert not strings & {"claim", "choice", "win", "magic", "blocked"}
+    assert art == {"title", "foe", "guide", "compiler", "crown", "banner", "map"}
+
+
+@pytest.mark.parametrize("edit,needle", [
+    (lambda pack, art: pack.strings.pop("verdict"), "strings.yaml: the classic page needs 'verdict'"),
+    (lambda pack, art: art.pop("foe"), "art/classic/foe.txt: the classic page needs it"),
+    (lambda pack, art: art.update(scene_moon="x"), "art/classic/scene_moon.txt: not used"),
+    (lambda pack, art: art.update(goblin="x"), "art/classic/goblin.txt: not used"),
+])
+def test_the_pack_must_hold_what_the_page_reads(doc, capture, edit, needle):
+    pack = B.Pack("agentql")
+    data, errors = B.compile_pack(pack, {"agentql_capture": CAP.Capture(*capture, MODEL)})
+    art = dict(ART)
+    edit(pack, art)
+    assert any(needle in e for e in B.check_classic(pack, data, art, B.TEMPLATE.read_text(encoding="utf-8")))
+
+
+def test_art_files_drop_one_final_newline_and_need_id_names(tmp_path):
+    packs = _copy_packs(tmp_path)
+    folder = packs / "agentql/art/classic"
+    (folder / "Bad Name.txt").write_text("x\n", encoding="utf-8")
+    art, errors = B.classic_art(B.Pack("agentql", packs))
+    assert "art/classic/Bad Name.txt: name it with lowercase letters, digits and _" in errors
+    assert art["title"].startswith("\n") and art["title"].endswith("Q  U  E  S  T\n")   # its own newlines kept
+    assert not art["map"].endswith("\n")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_wording_is_escaped_then_marked_up(tmp_path):
+    # H(): the pack's text is escaped, then *x*, **x** and [x](https://…) become markup; values are
+    # escaped and never marked up; S() is plain text.
+    script = B.TEMPLATE.read_text(encoding="utf-8").split("<script>", 1)[1]
+    start, end = script.index("const STRINGS"), script.index("// The throne room")
+    js = (script[script.index("const esc ="):].split("\n", 1)[0] + "\n" + script[start:end].replace(
+        "const STRINGS = QUEST.pack.strings;", "const STRINGS = " + json.dumps({
+            "a": "<b> *hot* **bold** [link](https://example.com/x) [bad](javascript:alert(1)) {v}",
+            "plain": "{v} *not markup in S*"}) + ";"))
+    out = subprocess.run(["node", "-e", js + '\nconsole.log(JSON.stringify([H("a", {v: "*<i>*"}), S("plain", {v: "<x>"})]))'],
+                         capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    h, s = json.loads(out.stdout)
+    assert h == ('&lt;b&gt; <span class="hot">hot</span> <b>bold</b> <a href="https://example.com/x">link</a> '
+                 '[bad](javascript:alert(1)) *&lt;i&gt;*')
+    assert s == "<x> *not markup in S*"
+
+
+def test_the_page_title_and_description_are_escaped(doc, capture):
+    data, _ = _compile(doc, capture)
+    data["pack"]["title"] = 'Quest <b>"&'
+    data["pack"]["strings"]["page_description"] = 'Say "<hi>" & go'
+    html = B.render(B.TEMPLATE.read_text(encoding="utf-8"), data, "", ART)
+    assert "<title>Quest &lt;b&gt;&quot;&amp;</title>" in html
+    assert '<meta name="description" content="Say &quot;&lt;hi&gt;&quot; &amp; go">' in html
+    assert '<h1 class="sr-only">${esc(QUEST.pack.title)}</h1>' in B.TEMPLATE.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_a_second_game_renders_and_plays_on_its_own_wording_and_art(tmp_path):
+    # Every string and art piece is the second game's own (no AgentQL words), and its page plays to
+    # the end of every realm with nothing blank, undefined or unfilled.
+    pack = _second(tmp_path)
+    needed, pieces = B.classic_needs(B.TEMPLATE.read_text(encoding="utf-8"))
+    agentql = yaml.safe_load((PACK_DIR / "strings.yaml").read_text(encoding="utf-8"))
+    own = {k: f"<{k}> " + " ".join(re.findall(r"\{\w+\}", agentql[k])) for k in needed}
+    own.update(claim_true="Yes.", claim_false="No.", rune_label="THE RUNE", rune_name="The rune",
+               soon_marker="Soon:", page_description="A game about runes.")
+    (pack.dir / "strings.yaml").write_text(yaml.safe_dump(own, allow_unicode=True), encoding="utf-8")
+    (pack.dir / "art/classic").mkdir(parents=True)
+    for piece in pieces | {"scene_cave"}:
+        (pack.dir / f"art/classic/{piece}.txt").write_text(f"@BANNER\n  {piece}\n" if piece.startswith("scene_") else f"[{piece}]\n",
+                                                          encoding="utf-8")
+    pack = B.Pack("second", pack.dir.parent)
+    data, errors = B.compile_pack(pack)
+    art, art_errors = B.classic_art(pack)
+    assert errors == [] and art_errors == [] and B.check_classic(pack, data, art, B.TEMPLATE.read_text(encoding="utf-8")) == []
+    page = tmp_path / "index.html"
+    page.write_text(B.render(B.TEMPLATE.read_text(encoding="utf-8"), data, B.font_faces(), art), encoding="utf-8")
+    html = page.read_text(encoding="utf-8")
+    assert "<title>The Other Quest</title>" in html
+    r = subprocess.run(["node", str(HERE / "smoke_page.js"), str(page)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "decree" in r.stdout and "victory" in r.stdout, r.stdout
+    script = html.split("<script>", 1)[1]
+    for word in ("AgentQL", "Wizard", "Forge", "Dragon", "Spotter", "Kingdom of Law"):
+        assert word not in script and word not in json.dumps(own), word
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_the_agentql_page_smoke_plays_every_realm(tmp_path):
+    page = tmp_path / "index.html"
+    assert B.main(["--out", str(page)]) == 0
+    r = subprocess.run(["node", str(HERE / "smoke_page.js"), str(page)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.count("victory") == 4 and "decree" in r.stdout
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+@pytest.mark.parametrize("break_it,needle", [
+    (lambda h: h.replace('${H("victory_title")}', ""), None),                 # still renders: control
+    (lambda h: h.replace("return `${realmScene(r)}<h2>${H(\"victory_title\")}</h2>", "return ``; `"), "rendered nothing"),
+    (lambda h: h.replace('art("foe")', 'ART.nothing'), '"undefined"'),
+    (lambda h: h.replace('H("realm_max", { max: maxGold(r) })', 'H("realm_max")'), "unfilled {max}"),
+])
+def test_the_smoke_play_catches_a_broken_screen(tmp_path, break_it, needle):
+    template = B.TEMPLATE.read_text(encoding="utf-8")
+    broken = break_it(template)
+    assert broken != template or needle is None
+    data, _ = B.compile_pack(B.Pack("agentql"))
+    page = tmp_path / "index.html"
+    page.write_text(B.render(broken, data, "", ART), encoding="utf-8")
+    r = subprocess.run(["node", str(HERE / "smoke_page.js"), str(page)], capture_output=True, text=True)
+    if needle is None:
+        assert r.returncode == 0, r.stderr
+    else:
+        assert r.returncode != 0 and needle in r.stderr, r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("edit,needle", [
+    (lambda d: (d / "strings.yaml").write_text((d / "strings.yaml").read_text(encoding="utf-8").replace("verdict:", "unused_verdict:"), encoding="utf-8"),
+     "strings.yaml: the classic page needs 'verdict'"),
+    (lambda d: (d / "strings.yaml").write_text((d / "strings.yaml").read_text(encoding="utf-8") + "\nzz_unused: hello\n", encoding="utf-8"),
+     "strings.yaml: 'zz_unused' is not used"),
+    (lambda d: (d / "strings.yaml").write_text((d / "strings.yaml").read_text(encoding="utf-8").replace("page_description:", "page_descr:"), encoding="utf-8"),
+     "the classic page needs 'page_description'"),
+    (lambda d: (d / "art/classic/foe.txt").unlink(), "art/classic/foe.txt: the classic page needs it"),
+    (lambda d: (d / "art/classic/goblin.txt").write_text("x\n", encoding="utf-8"), "art/classic/goblin.txt: not used"),
+    (lambda d: (d / "art/classic/scene_law.txt").write_text("x\n", encoding="utf-8"), "art/classic/scene_law.txt: not used"),
+    (lambda d: (d / "art/classic/Bad.txt").write_text("x\n", encoding="utf-8"), "art/classic/Bad.txt: name it with lowercase"),
+])
+def test_the_build_refuses_a_pack_the_page_cannot_use(tmp_path, monkeypatch, edit, needle):
+    packs = _copy_packs(tmp_path)
+    edit(packs / "agentql")
+    monkeypatch.setattr(B, "PACKS", packs)
+    errors = B.build(check=True)[3]
+    assert any(needle in e for e in errors), errors
+
+
+def test_art_survives_the_page_round_trip(doc, capture):
+    data, _ = _compile(doc, capture)
+    art = dict(ART, title="</script><!--<script> & ok")
+    html = B.render(B.TEMPLATE.read_text(encoding="utf-8"), data, "", art)
+    body = html.split('<script id="classic-art" type="application/json">', 1)[1].split("</script>", 1)[0]
+    assert not set(body) & set("<>&") and json.loads(body)["title"] == "</script><!--<script> & ok"
+
+
+def test_placeholder_names_in_pack_text_are_never_filled(doc, capture):
+    data, _ = _compile(doc, capture)
+    data["pack"]["strings"]["verdict"] = "__CLASSIC_ART__ __PAGE_TITLE__ /*__FONT_FACES__*/"
+    html = B.render(B.TEMPLATE.read_text(encoding="utf-8"), data, "FONTS", ART)
+    body = html.split('<script id="quest-data" type="application/json">', 1)[1].split("</script>", 1)[0]
+    assert json.loads(body)["pack"]["strings"]["verdict"] == "__CLASSIC_ART__ __PAGE_TITLE__ /*__FONT_FACES__*/"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_fill_takes_values_literally_and_only_its_own():
+    script = B.TEMPLATE.read_text(encoding="utf-8").split("<script>", 1)[1]
+    line = next(x for x in script.splitlines() if x.startswith("const fill ="))
+    js = line + '\nconsole.log(JSON.stringify([fill("{a} {a} {b} {constructor} {toString}", {a: "$& $1"})]))'
+    out = subprocess.run(["node", "-e", js], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout) == ["$& $1 $& $1 {b} {constructor} {toString}"]
+
+
+def test_art_keeps_its_trailing_spaces():
+    # An editor that trims trailing whitespace would change the page; this notices.
+    lines = (PACK_DIR / "art/classic/scene_mines.txt").read_text(encoding="utf-8").splitlines()
+    assert sum(1 for x in lines if x != x.rstrip()) == 5
+
+
+def test_the_build_keeps_arts_trailing_spaces():
+    assert sum(1 for x in ART["scene_mines"].split("\n") if x != x.rstrip()) == 5
+
+
+@pytest.mark.parametrize("mark", [B.PLACEHOLDER, B.FONT_PLACEHOLDER, B.ART_PLACEHOLDER, B.TITLE_PLACEHOLDER,
+                                  B.DESCRIPTION_PLACEHOLDER])
+def test_render_needs_every_placeholder_exactly_once(mark):
+    template = B.TEMPLATE.read_text(encoding="utf-8")
+    for broken in (template.replace(mark, ""), template.replace(mark, mark + mark)):
+        with pytest.raises(ValueError, match=re.escape(mark)):
+            B.render(broken, {"pack": {}})
+
+
+def test_wording_in_attributes_is_escaped():
+    # H() output is for element text; an attribute takes the plain string, escaped.
+    assert 'aria-label="${esc(S("legend_label"))}"' in B.TEMPLATE.read_text(encoding="utf-8")
+
+
+# ---- PR 2b review, round 2: the smoke play must finish every realm --------------------------------
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+@pytest.mark.parametrize("break_it,needle", [
+    # victory's "Back to the map" leads nowhere: the old smoke play looped and passed
+    (lambda h: h.replace('${choices([{ label: S("back_to_map"), go: toMap }, { label: S("quest_again")',
+                         '${choices([{ label: S("back_to_map"), go: go({ screen: "quest", enc: 0, step: 0, gold: 0, flash: null }) }, { label: S("quest_again")'),
+     "ran out of steps"),
+    # the last realm's map entry opens the first realm instead
+    (lambda h: h.replace('go: go({ screen: "realm", realm: i, flash: null })', 'go: go({ screen: "realm", realm: i === REALMS.length - 1 ? 0 : i, flash: null })'),
+     'did not open from the map'),
+    # a realm that returns to the map without finishing (the round-2 hole)
+    (lambda h: h.replace('if (state.step >= e.points.length) state.screen = "victory"; }',
+                         'if (state.step >= e.points.length) state.screen = state.realm === REALMS.length - 1 ? "map" : "victory"; }'),
+     'left realm "isles" without reaching victory'),
+    (lambda h: h.replace('else if (lastHall) state.screen = "decree";', 'else if (lastHall) state.screen = "map";'),
+     'left realm "law" without reaching decree'),
+    (lambda h: h.replace(': go({ screen: "quest", enc: 0, step: 0, gold: 0, flash: null });',
+                         ': go({ screen: "quest", realm: 1, enc: 0, step: 0, gold: 0, flash: null });'),
+     'left realm "lake" without reaching victory'),
+])
+def test_the_smoke_play_fails_a_realm_it_cannot_finish(tmp_path, break_it, needle):
+    template = B.TEMPLATE.read_text(encoding="utf-8")
+    broken = break_it(template)
+    assert broken != template
+    data, _ = B.compile_pack(B.Pack("agentql"))
+    page = tmp_path / "index.html"
+    page.write_text(B.render(broken, data, "", ART), encoding="utf-8")
+    r = subprocess.run(["node", str(HERE / "smoke_page.js"), str(page)], capture_output=True, text=True)
+    assert r.returncode != 0 and needle in r.stderr, r.stdout + r.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_the_smoke_play_shows_content_braces_as_written(tmp_path):
+    # A formula's {date} is content, not an unfilled placeholder.
+    data, _ = B.compile_pack(B.Pack("agentql"))
+    data["realms"][1]["encounters"][0]["panes"][0]["lines"].append("last_value(sum(balance), query_groups(), {date})")
+    page = tmp_path / "index.html"
+    page.write_text(B.render(B.TEMPLATE.read_text(encoding="utf-8"), data, "", ART), encoding="utf-8")
+    r = subprocess.run(["node", str(HERE / "smoke_page.js"), str(page)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_the_page_plays_halls_or_one_encounter_per_realm(doc, capture):
+    pack = B.Pack("agentql")
+    data, _ = B.compile_pack(pack, {"agentql_capture": CAP.Capture(*capture, MODEL)})
+    data["realms"][0]["encounters"] = data["realms"][1]["encounters"]
+    data["realms"][2]["encounters"] = data["realms"][2]["encounters"] * 2
+    errors = B.check_classic(pack, data, ART, B.TEMPLATE.read_text(encoding="utf-8"))
+    assert "realm law: the classic page plays either halls or one encounter per realm" in errors
+    assert "realm lake: the classic page plays either halls or one encounter per realm" in errors
+
+
+def test_claim_buttons_count_as_used_only_when_a_hall_asks_a_claim(tmp_path):
+    pack = _second(tmp_path)
+    data, _ = B.compile_pack(pack)
+    assert {"claim_true", "claim_false"} <= B.engine_strings(pack, [], data)
+    data["realms"][0]["halls"][0]["trials"] = [t for t in data["realms"][0]["halls"][0]["trials"] if t["kind"] != "claim"]
+    assert not {"claim_true", "claim_false"} & B.engine_strings(pack, [], data)
+
+
+def test_a_plugin_lists_its_strings_as_a_set(tmp_path, monkeypatch):
+    (tmp_path / "odd.py").write_text('NAME = "odd"\nSTRINGS = "send_to"\n', encoding="utf-8")
+    monkeypatch.setattr(B, "CHECKS", tmp_path)
+    with pytest.raises(ValueError, match="STRINGS must be a set"):
+        B.load_plugins(["odd"])
+
+
+def test_a_sealed_realm_may_have_a_scene(doc, capture):
+    pack = B.Pack("agentql")
+    data, _ = B.compile_pack(pack, {"agentql_capture": CAP.Capture(*capture, MODEL)})
+    data["realms"][4]["sealed"], data["realms"][4]["encounters"] = True, []
+    assert not any("scene_isles" in e for e in B.check_classic(pack, data, ART, B.TEMPLATE.read_text(encoding="utf-8")))
+
+
+def test_placeholder_names_anywhere_in_the_pack_are_never_filled(doc, capture):
+    marks = " ".join([B.PLACEHOLDER, B.ART_PLACEHOLDER, B.TITLE_PLACEHOLDER, B.DESCRIPTION_PLACEHOLDER, B.FONT_PLACEHOLDER, r"\1 \g<0> $&"])
+    data, _ = _compile(doc, capture)
+    data["pack"]["title"] = data["pack"]["strings"]["page_description"] = marks
+    html = B.render(B.TEMPLATE.read_text(encoding="utf-8"), data, "FONTS", dict(ART, title=marks))
+    head = html.split("<style>", 1)[0]
+    assert head.count(B._html_text(marks)) == 2               # the title and the description, as written
+    art = json.loads(html.split('<script id="classic-art" type="application/json">', 1)[1].split("</script>", 1)[0])
+    assert art["title"] == marks
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_the_soon_marker_comes_from_the_pack():
+    script = B.TEMPLATE.read_text(encoding="utf-8").split("<script>", 1)[1]
+    lines = script.splitlines()
+    take = lambda start: "\n".join(lines[lines.index(next(x for x in lines if x.startswith(start))):][:5])
+    js = "\n".join([next(x for x in lines if x.startswith("const esc =")), next(x for x in lines if x.startswith("const fill =")),
+                    'const STRINGS = {"soon_marker": "Soon:"};', next(x for x in lines if x.startswith("const S =")),
+                    take("function cell(c)")])
+    out = subprocess.run(["node", "-e", js + '\nconsole.log(JSON.stringify([cell("Pin it. Soon: tomorrow"), cell("Coming soon: x")]))'],
+                         capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout) == ['Pin it. <span class="soon">Soon:</span> tomorrow', "Coming soon: x"]
+
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+@pytest.mark.parametrize("where", ["pane", "takeaway", "covers"])
+def test_content_using_a_placeholders_name_is_shown_as_written(tmp_path, where):
+    data, _ = B.compile_pack(B.Pack("agentql"))
+    text = "group_aggregate(sum(sales), {state}, {}) and {amount} for {name}"
+    encounter = data["realms"][1]["encounters"][0]
+    if where == "pane":
+        encounter["panes"][0]["lines"].append(text)
+    elif where == "takeaway":
+        encounter["takeaway"] += " " + text
+    else:
+        data["realms"][1]["covers"] += " " + text
+    page = tmp_path / "index.html"
+    page.write_text(B.render(B.TEMPLATE.read_text(encoding="utf-8"), data, "", ART), encoding="utf-8")
+    r = subprocess.run(["node", str(HERE / "smoke_page.js"), str(page)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_a_games_own_undefined_does_not_hide_a_broken_screen(tmp_path):
+    data, _ = B.compile_pack(B.Pack("agentql"))
+    data["realms"][1]["encounters"][0]["takeaway"] += " Dividing by zero is undefined."
+    page = tmp_path / "index.html"
+    page.write_text(B.render(B.TEMPLATE.read_text(encoding="utf-8"), data, "", ART), encoding="utf-8")
+    ok = subprocess.run(["node", str(HERE / "smoke_page.js"), str(page)], capture_output=True, text=True)
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    broken = B.TEMPLATE.read_text(encoding="utf-8").replace('art("foe")', "ART.nothing")
+    page.write_text(B.render(broken, data, "", ART), encoding="utf-8")
+    r = subprocess.run(["node", str(HERE / "smoke_page.js"), str(page)], capture_output=True, text=True)
+    assert r.returncode != 0 and '"undefined"' in r.stderr, r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("value", ["None", "{1}", '"send_to"'])
+def test_a_plugins_strings_must_be_a_set_of_names(tmp_path, monkeypatch, value):
+    (tmp_path / "odd.py").write_text(f'NAME = "odd"\nSTRINGS = {value}\n', encoding="utf-8")
+    monkeypatch.setattr(B, "CHECKS", tmp_path)
+    with pytest.raises(ValueError, match="STRINGS must be a set"):
+        B.load_plugins(["odd"])
+
+
+def test_a_broken_trial_does_not_also_report_its_strings_unused(tmp_path, monkeypatch):
+    packs = _copy_packs(tmp_path)
+    content = packs / "agentql/content.yaml"
+    text = content.read_text(encoding="utf-8")
+    assert text.count("          - kind: claim") > 1
+    content.write_text(text.replace("          - kind: claim", "          - kind: clam"), encoding="utf-8")   # every claim broken
+    monkeypatch.setattr(B, "PACKS", packs)
+    errors = B.build(check=True)[3]
+    assert any("kind must be one of" in e for e in errors)
+    assert not any("is not used by the page" in e for e in errors), errors

@@ -71,6 +71,7 @@ one game is a **plugin** in `checks/` that the pack names. Design:
 
 ```
 packs/agentql/{pack,content,strings}.yaml ─┐
+packs/agentql/art/classic/*.txt           ─┤
 lesson-sql.md, learning-path.md (sources) ─┤                   ┌─► quest.json         (the checked data)
 classic/game.html, fonts/                 ─┼─► build.py ───────┼─► quest.schema.json  (generated for this pack)
 schema/core.json, denylist.txt            ─┤   + checks/*.py   └─► index.html         (self-contained, quest.json inside)
@@ -83,7 +84,15 @@ schema/core.json, denylist.txt            ─┤   + checks/*.py   └─► ind
 - **`packs/agentql/content.yaml`** holds what the capture can't: the realms, halls and encounters,
   which SQL lines to ask about (matched as whole lines, never by line number), facts about the
   whole statement (`sql_count`), who put each one there, and the words shown.
-- **`packs/agentql/strings.yaml`** holds wording a front end shows that isn't content.
+- **`packs/agentql/strings.yaml`** holds every sentence a front end shows that isn't content: the
+  title screen, buttons, feedback, the legend and rule card, the hoard's headings, the verdict and
+  the course links. `*word*` is highlighted, `**word**` bold and `[text](https://…)` a link; the
+  page escapes everything else, and `{name}` is filled in by the page.
+- **`packs/agentql/art/classic/`** holds the classic page's ASCII art, one file per piece, each
+  file's text less its final newline: `title`, `guide`, `compiler` and `foe` (the lexicon's roles),
+  `crown`, `banner`, `map`, and `scene_<realm id>` for each realm with a scene (`@BANNER` marks
+  where the realm's name goes, a leading `!` shimmers a line, `$` and `%` are lanterns). The build
+  writes it into the classic page; it isn't in `quest.json`.
 - **`checks/`**, the plugins this pack names:
   - `agentql_capture`: the only source of SQL is `lesson-sql.md` (in the skill's `references/`),
     the AgentQL and `executable_sql` captured live by `tools/agentql-retest --suite lessons guards`
@@ -92,8 +101,18 @@ schema/core.json, denylist.txt            ─┤   + checks/*.py   └─► ind
   - `agentql_rules`: who-put-it-there questions, the three engines, AgentQL as the foe's path,
     and crediting: a who-put-it-there question about a row cap or a null guard must answer
     ThoughtSpot.
-- **`classic/game.html`** is the page with `__QUEST_DATA__` and `/*__FONT_FACES__*/`
-  placeholders. `build.py` writes the data and the fonts into it, so the page makes **no outside
+- **`classic/game.html`** is the page, with five placeholders (`__QUEST_DATA__`, `__CLASSIC_ART__`,
+  `__PAGE_TITLE__`, `__PAGE_DESCRIPTION__`, `/*__FONT_FACES__*/`) that `build.py` fills in one
+  pass. It holds no game's wording or art: the build checks the pack holds every string and art
+  piece the page reads (from its `S()`, `H()` and `art()` calls), and that every string is used by
+  the page, the engine or a plugin, and every art file by the page. The page plays a realm's halls,
+  or its one encounter, so a realm may have one or the other. What the page still draws or says
+  itself, for any game: the hall's throne room (`hallScene`); the frames around the map and around a
+  realm's name in its scene; the quote marks around a quest's question; the routes' `:` and ` → `;
+  the `[n]` key hints, the `n/m` petition counter and the decree's numbering; the foe's `█░` bar;
+  the colon after each pane's screen-reader name; upper-casing realm and hall names in banners;
+  its English `lang` and the sound group's label; and trimming a leading "The " from realm names in
+  the routes. It makes **no outside
   requests** and runs from Pages, any static host, or a double-click.
 - **`schema/core.json`** is the general part of every pack's schema; see below.
 - **`denylist.txt`** holds hashes of names from published fantasy works. A pack using one fails
@@ -169,6 +188,10 @@ sources:
 | `it asks about a row cap or a null guard, which ThoughtSpot adds` | a who point credits the row cap or a null guard to the Model or the AgentQL | answer `thoughtspot`: both are ThoughtSpot cluster settings |
 | `'…' is a name from a published work` | a word in the pack or the page is on the denylist | use a generic fantasy name |
 | `denylist: …` | `denylist.txt` is missing, or holds a line that isn't a hash | restore it; add names only with `denylist.py add` |
+| `strings.yaml: the classic page needs '…'` or `art/classic/….txt: the classic page needs it` | the page reads a string or art piece the pack lacks | add it to the pack |
+| `art/classic/….txt: not used` | an art file the page never reads, or a scene for a realm that doesn't exist or has halls (a realm of halls shows its crown) | remove it, or fix its name |
+| `strings.yaml: '…' is not used by the page, the engine or a plugin` | a string nothing reads (often a typo, or one a plugin reads without listing it in `STRINGS`) | remove it, or list it in the plugin's `STRINGS` |
+| `realm …: the classic page plays either halls or one encounter per realm` | a realm with halls and an encounter, or two encounters | split it into realms |
 | `pack.yaml: …` (for example `unknown key`, `unlock must be one of`, `pane …: label '…' is not in strings.yaml`, `pane id '…' is also a content key`) | the manifest is malformed | fix `pack.yaml`; the message names the rule |
 | `packs … and … share storage_key '…'` (or `id`, `publish_path`) | two games would overwrite each other's saves or Pages folder | give each pack its own |
 | `id '…' must be lowercase letters, digits and _ (and not 'hall')` or `duplicate id` | a realm, hall or encounter id breaks the step-id grammar | rename it |
@@ -202,7 +225,9 @@ fails the build.
 ## Adding a game
 
 Create `packs/<id>/` with a `pack.yaml` (its own `id`, `publish_path` and `storage_key`, which
-no other pack may share: every game is served from the same origin), a `content.yaml` and a
-`strings.yaml`. It uses none of AgentQL's plugins, or new ones of its own (see "Plugins" in
+no other pack may share: every game is served from the same origin), a `content.yaml`, a
+`strings.yaml` holding every string the classic page reads, and `art/classic/` holding the pieces
+it reads (scenes are optional: a realm without one shows a banner). The build lists anything
+missing. It uses none of AgentQL's plugins, or new ones of its own (see "Plugins" in
 `build.py`); its schema is generated from the core and its own plugins. Build it with
 `python3 tools/quest/build.py --pack <id>`.

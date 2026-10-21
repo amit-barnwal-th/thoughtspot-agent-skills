@@ -8,6 +8,7 @@ const vm = require("vm");
 
 const html = fs.readFileSync(process.argv[2], "utf8");
 const data = html.split('<script id="quest-data" type="application/json">')[1].split("</script>")[0];
+const art = html.split('<script id="classic-art" type="application/json">')[1].split("</script>")[0];
 const js = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].pop()[1];
 const Q = JSON.parse(data);
 const KEY = Q.pack.storage_key;  // saves are <key>-progress and <key>-sound
@@ -29,7 +30,7 @@ function boot({ audio = "fake", saved = {} } = {}) {
   class ThrowingAudioContext { constructor() { throw new Error("audio is not allowed here"); } }
   page.screen = { innerHTML: "", querySelector: () => null };
   const el = () => ({ textContent: "", setAttribute() {} });
-  const els = { "quest-data": { textContent: data }, live: el(), "sound-sfx": el(), "sound-music": el() };
+  const els = { "quest-data": { textContent: data }, "classic-art": { textContent: art }, live: el(), "sound-sfx": el(), "sound-music": el() };
   page.doc = {
     getElementById: id => els[id] || page.screen,
     addEventListener: (type, fn) => { (page.listeners[type] = page.listeners[type] || []).push(fn); },
@@ -161,6 +162,7 @@ const lawQs = law.halls.reduce((n, h) => n + h.trials.length, 0);
 expected.law = WIN * (lawQs - 1) - LOSS;                         // one magic (no gold); one paid miss
 if (S().gold !== expected.law) fail(`Law should end with ${expected.law} gold, has ${S().gold}`, where());
 expect("decree", "the last hall ends in the decree");
+if (!has(Q.pack.strings.record_best)) fail("a first finish should say it is the best here yet", where());
 law.scroll.rows.forEach(row => { if (!has(row.label)) fail(`the recap is missing "${row.label}"`, where()); });
 log.push(`law: ${law.halls.length} halls, ${lawQs} questions, ${expected.law} gold`);
 press(0); expect("map", "the decree returns to the map");
@@ -182,8 +184,8 @@ Q.realms.forEach((r, ri) => {
   });
   if (p.outcomes.findIndex(o => o.kind === "loss") < 0) fail("every quest should have at least one wrong path");
   answerQuestion(p.correct, p.options.length, "right", p.outcomes[p.correct].why, p.options[p.correct]);
-  expect("wizard", "the Wizard writes the AgentQL after the right path");
-  press(0); expect("forge", "the scroll goes to the Forge"); press(0); expect("battle", "the fight starts");
+  expect("guide", "the Wizard writes the AgentQL after the right path");
+  press(0); expect("compiler", "the scroll goes to the Forge"); press(0); expect("battle", "the fight starts");
   e.panes.forEach(pane => {
     if (!has(pane.label) || (pane.caption && !has(pane.caption))) fail(`the ${pane.id} pane should show its label and caption`, where());
   });
@@ -198,6 +200,7 @@ Q.realms.forEach((r, ri) => {
     answerQuestion(pt.correct, pt.options.length, k === 1 ? "wrong-then-right" : "right", pt.why, pt.options[pt.correct]);
   });
   expect("victory", "the dragon falls");
+  if (!has(Q.pack.strings.record_best)) fail("a first finish should say it is the best here yet", where());
   if (!text().includes("DETERMINISTIC RULES UNCOVERED")) fail("the hoard should be headed as deterministic rules", where());
   if (!text().includes("for the same user, always compiles to the same SQL.")) fail("every hoard ends on determinism", where());
   const hoard = text(), yoursAt = hoard.indexOf("YOUR PART");

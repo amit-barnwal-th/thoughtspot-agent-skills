@@ -7,6 +7,7 @@ A pack is a folder under `packs/` (design: docs/superpowers/specs/2026-10-21-age
     encounter shows; the reward screen's rule tags; the lexicon; and the checks (plugins) to run.
   - `content.yaml`: the realms, halls, encounters and their questions.
   - `strings.yaml`: wording a front end shows that isn't content.
+  - `art/classic/*.txt`: the classic page's ASCII art (see the tool's README).
 
 The engine knows only general things: realms, halls, trials, encounters, panes, points, routes,
 scoring and saves. Anything specific to one game, such as AgentQL's captured SQL and course, is a
@@ -14,8 +15,9 @@ plugin in `checks/` that the pack names.
 
 The build writes the game's data, `quest.json`; the schema it fits, `quest.schema.json`, generated
 for this pack from `schema/core.json`; and one self-contained `index.html` (the classic text
-adventure, `classic/game.html` with the data and fonts written in), so the page makes no outside
-requests and runs from GitHub Pages, any static host, or a double-click.
+adventure, `classic/game.html` with the data, the pack's art, its title and description, and the
+fonts written in), so the page makes no outside requests and runs from GitHub Pages, any static
+host, or a double-click.
 
     python3 tools/quest/build.py                   # write tools/quest/dist/
     python3 tools/quest/build.py --out _site/index.html   # quest.json and its schema land beside it
@@ -39,6 +41,7 @@ A plugin is a module in `checks/` with a NAME. Everything else is optional:
   REFS          {"realm" | "encounter": {key: JSON Schema}}: what it records under that level's refs.
   META          a JSON Schema object for what it records under meta[NAME] (needs a meta hook).
   SOURCES       the pack.yaml sources it reads; a pack that lacks one fails before compiling.
+  STRINGS       the strings.yaml keys it reads (so the build knows they are used).
   POINT_KINDS, TRIAL_KINDS   point and trial kinds it compiles; COMPILES_PATH: it compiles paths.
                 A kind belongs to one owner: the engine's own (claim, choice) can't be taken.
 A pane whose `from` names the plugin is filled by its encounter hook. Plugins run in the order the
@@ -81,6 +84,8 @@ FONT_DIR = HERE / "fonts"
 DEFAULT_OUT = HERE / "dist" / "index.html"
 PLACEHOLDER = "__QUEST_DATA__"
 FONT_PLACEHOLDER = "/*__FONT_FACES__*/"
+ART_PLACEHOLDER = "__CLASSIC_ART__"
+TITLE_PLACEHOLDER, DESCRIPTION_PLACEHOLDER = "__PAGE_TITLE__", "__PAGE_DESCRIPTION__"
 PAGES = "https://thoughtspot.github.io/thoughtspot-agent-skills"
 
 # (family, weight, file in fonts/) — Latin subsets from Fontsource 5.3.0, SIL OFL 1.1.
@@ -244,6 +249,9 @@ def load_plugins(names: list[str]) -> list:
         spec.loader.exec_module(mod)
         if getattr(mod, "NAME", None) != name:
             raise ValueError(f"checks/{name}.py must set NAME = {name!r}")
+        strings = getattr(mod, "STRINGS", set())
+        if not isinstance(strings, (set, frozenset, list, tuple)) or not all(isinstance(k, str) for k in strings):
+            raise ValueError(f"checks/{name}.py: STRINGS must be a set of strings.yaml keys")
         if getattr(mod, "META", None) and not hasattr(mod, "meta"):
             raise ValueError(f"checks/{name}.py declares META but has no meta hook")
         plugins.append(mod)
@@ -763,16 +771,87 @@ def font_faces(font_dir: pathlib.Path = FONT_DIR) -> str:
     return "\n".join(rules)
 
 
-def render(template: str, data: dict, fonts_css: str = "") -> str:
-    if template.count(PLACEHOLDER) != 1:
-        raise ValueError(f"game.html must contain {PLACEHOLDER} exactly once")
-    if template.count(FONT_PLACEHOLDER) != 1:
-        raise ValueError(f"game.html must contain {FONT_PLACEHOLDER} exactly once")
-    # The JSON sits in a <script type="application/json">. Escaping every <, > and & keeps any
-    # string from closing the element or opening a "<!--<script" state in the HTML parser.
-    payload = (json.dumps(data, ensure_ascii=False, separators=(",", ":"))
-               .replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e"))
-    return template.replace(PLACEHOLDER, payload).replace(FONT_PLACEHOLDER, fonts_css)
+def _script_json(value) -> str:
+    """JSON for a <script type="application/json">. Escaping every <, > and & keeps any string from
+    closing the element or opening a "<!--<script" state in the HTML parser."""
+    return (json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            .replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e"))
+
+
+def _html_text(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def render(template: str, data: dict, fonts_css: str = "", art: dict | None = None) -> str:
+    """The classic page: the data, the pack's art (art/classic/), its title and description and
+    the fonts written into classic/game.html."""
+    for mark in (PLACEHOLDER, FONT_PLACEHOLDER, ART_PLACEHOLDER, TITLE_PLACEHOLDER, DESCRIPTION_PLACEHOLDER):
+        if template.count(mark) != 1:
+            raise ValueError(f"game.html must contain {mark} exactly once")
+    pack = data.get("pack") or {}
+    values = {PLACEHOLDER: _script_json(data), ART_PLACEHOLDER: _script_json(art or {}),
+              TITLE_PLACEHOLDER: _html_text(pack.get("title", "")),
+              DESCRIPTION_PLACEHOLDER: _html_text((pack.get("strings") or {}).get("page_description", "")),
+              FONT_PLACEHOLDER: fonts_css}
+    # One pass over the template, so a placeholder's name inside the pack's own text is never filled.
+    return re.sub("|".join(re.escape(m) for m in values), lambda m: values[m.group(0)], template)
+
+
+# What the classic page reads from a pack: the string keys in its S("…") / H("…") calls (including
+# both sides of a ternary), the art in its art("…") calls, the map, and a scene per realm.
+_STRING_CALL = re.compile(r"\b[SH]\(((?:[^()]|\([^()]*\))*?)[,)]")
+_ART_CALL = re.compile(r'\bart\("([a-z0-9_]+)"')
+
+
+def classic_needs(template: str) -> tuple[set[str], set[str]]:
+    script = template.split("<script>", 1)[-1]
+    strings = {k for arg in _STRING_CALL.findall(script) for k in re.findall(r'"([a-z0-9_]+)"', arg)}
+    return strings | {"page_description"}, set(_ART_CALL.findall(script)) | {"map"}  # the head's description
+
+
+def engine_strings(pack: Pack, plugins: list, data: dict) -> set[str]:
+    """The strings the engine and plugins read: the claim buttons (when a hall asks a claim), pane
+    labels and captions, and each plugin's STRINGS."""
+    claims = any(t.get("kind") == "claim" for r in data.get("realms") or [] for h in r.get("halls") or []
+                 for t in h.get("trials") or [])
+    keys = {"claim_true", "claim_false"} if claims else set()
+    for spec in pack.panes:
+        if isinstance(spec, dict):
+            keys |= {spec.get(k) for k in ("label", "name", "caption") if isinstance(spec.get(k), str) and spec.get(k)}
+    for pl in plugins:
+        keys |= set(getattr(pl, "STRINGS", ()))
+    return keys
+
+
+def classic_art(pack: Pack) -> tuple[dict, list[str]]:
+    """The pack's art/classic/*.txt, by file name: each file's text less its final newline."""
+    folder, art, errors = pack.dir / "art" / "classic", {}, []
+    for path in sorted(folder.glob("*.txt")) if folder.is_dir() else []:
+        if not ID.fullmatch(path.stem):
+            errors.append(f"art/classic/{path.name}: name it with lowercase letters, digits and _")
+        text = path.read_text(encoding="utf-8")
+        art[path.stem] = text[:-1] if text.endswith("\n") else text
+    return art, errors
+
+
+def check_classic(pack: Pack, data: dict, art: dict, template: str, unused: bool = True) -> list[str]:
+    """Everything the classic page reads must be in the pack, and the pack's art must all be used.
+    `unused`: also refuse strings nothing reads (skipped when the compile already failed, since a
+    broken trial can make a used string look unused)."""
+    strings, pieces = classic_needs(template)
+    scenes = {f"scene_{r['id']}" for r in data.get("realms") or [] if not r["halls"]}  # a realm of halls shows its crown
+    errors = [f"strings.yaml: the classic page needs {k!r}" for k in sorted(strings - set(pack.strings))]
+    used = strings | engine_strings(pack, load_plugins(pack.manifest.get("checks") or []), data)
+    if unused:
+        errors += [f"strings.yaml: {k!r} is not used by the page, the engine or a plugin" for k in sorted(set(pack.strings) - used)]
+    errors += [f"art/classic/{k}.txt: the classic page needs it" for k in sorted(pieces - set(art))]
+    for r in data.get("realms") or []:  # the page plays a realm's halls, or its one encounter
+        if r["halls"] and r["encounters"] or len(r["encounters"]) > 1:
+            errors.append(f"realm {r['id']}: the classic page plays either halls or one encounter per realm")
+    for k in sorted(set(art) - pieces - scenes):
+        errors.append(f"art/classic/{k}.txt: not used (the page reads {sorted(pieces)}, and scene_<realm id> "
+                      f"for each realm without halls)")
+    return errors
 
 
 def _not_json(name: str):
@@ -796,10 +875,14 @@ def build(pack_id: str = DEFAULT_PACK, check: bool = False) -> tuple[str | None,
     else:
         if data:  # a pack that failed before compiling has no data to check
             errors += check_schema(data, schema)
+    art, art_errors = classic_art(pack)
+    errors += art_errors
+    if data:
+        errors += check_classic(pack, data, art, TEMPLATE.read_text(encoding="utf-8"), unused=not errors)
     if errors:
         return None, data, schema, errors
     fonts = font_faces()  # read even under --check, so a missing font file fails pre-commit too
-    html = None if check else render(TEMPLATE.read_text(encoding="utf-8"), data, fonts)
+    html = None if check else render(TEMPLATE.read_text(encoding="utf-8"), data, fonts, art)
     return html, data, schema, errors
 
 
