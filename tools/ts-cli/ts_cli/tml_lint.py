@@ -9,10 +9,13 @@ checks worth failing on locally, without a live call, especially across a batch 
 generated TML. I15 is the misplaced-column-root-key check (BL-232): a `description` under
 `properties:` imports with status OK and is then silently discarded. I16 is cross-file
 (it needs the Table TML linted alongside the Model): a Model column `AGGREGATE` over a
-Table column that is not breaks every AgentQL/SpotQL query on it. Rules mirror
-the invariants in `agents/shared/schemas/ts-model-conversion-invariants.md`.
+Table column that is not breaks every AgentQL/SpotQL query on it. I17-I19 are the
+join-graph rules (live-probed 2026-10-21): the server rejects a cycle, a second route,
+a self-join, or an `on:` naming the wrong tables, but its message names none of the
+joins at fault — these do. Rules mirror the invariants in
+`agents/shared/schemas/ts-model-conversion-invariants.md`.
 
-CANONICAL-RULE-SET: I1/I2/I4/I5/I8/I12/I13/I14/I15/I16
+CANONICAL-RULE-SET: I1/I2/I4/I5/I8/I12/I13/I14/I15/I16/I17/I18/I19
     The one authoritative enumeration of what this module checks, gated by
     tools/validate/check_lint_invariant_list.py against the findings the code
     actually emits. Do not restate this set anywhere else — name the concept
@@ -25,6 +28,10 @@ from __future__ import annotations
 
 import re
 from typing import Any
+
+from ts_cli.tml_join_graph import (
+    JoinGraph, ambiguous_paths, directed_cycles, node_id, on_clause_refs, on_clause_tables,
+)
 
 # Chart types whose rendering needs an explicit encoding — an x/y (+ series) axis map
 # (legacy cartesian, `chart.axis_configs`) or the ADVANCED_* shelf model
@@ -219,6 +226,9 @@ def lint_tml(data: dict) -> list[str]:
     findings.extend(_check_bare_column_id_single_table(model_tables, columns))
     findings.extend(_check_dangling_formula_refs(formulas, columns))
     findings.extend(_check_duplicate_join_pairs(model_tables))
+    findings.extend(_check_join_path_ambiguity(model_tables))
+    findings.extend(_check_self_joins(model_tables))
+    findings.extend(_check_join_on_tables(model_tables))
     findings.extend(_check_misplaced_column_root_keys(columns))
 
     return findings
@@ -274,16 +284,6 @@ def _check_misplaced_column_root_keys(columns: list) -> list[str]:
     return findings
 
 
-def _node_id(entry: dict) -> str:
-    """A model_tables entry's node identity.
-
-    `alias` wins when present — that is the whole point of an alias, and it is
-    what `joins[].with` and `column_id` prefixes reference. Otherwise `id`
-    (which I4 already pins to `name`), else `name`.
-    """
-    return entry.get("alias") or entry.get("id") or entry.get("name") or "?"
-
-
 def _check_duplicate_join_pairs(model_tables: list) -> list[str]:
     """I14 — no ordered table pair may be joined more than once.
 
@@ -302,7 +302,7 @@ def _check_duplicate_join_pairs(model_tables: list) -> list[str]:
     for t in model_tables:
         if not isinstance(t, dict):
             continue
-        frm = _node_id(t)
+        frm = node_id(t)  # alias, else id, else name — tml_join_graph's one definition
         seen: dict[str, list[str]] = {}
         for j in t.get("joins") or []:
             if not isinstance(j, dict):
@@ -319,6 +319,103 @@ def _check_duplicate_join_pairs(model_tables: list) -> list[str]:
                     f"ThoughtSpot will not load the Model. Give each role its "
                     f"own aliased model_tables entry (name: the physical table, "
                     f"alias: a unique per-role id) and point one join at each."
+                )
+    return findings
+
+
+def _check_join_path_ambiguity(model_tables: list) -> list[str]:
+    """I17 — the directed join graph must have one route between any two tables.
+
+    An arrow runs from a join's MANY side to its ONE side, so `cardinality` sets it, not
+    which entry declares the join (a ONE_TO_MANY points from `with:` back to the entry).
+    Three shapes, all rejected at import with nothing but a code ("Schema validation
+    failed", live-probed 2026-10-21): a cycle that follows the arrows (13123); two
+    arrow-following routes from one table to another (13124); and two joins on the same
+    arrow declared from different entries — an M:1 under A plus a 1:M under B (13124).
+    Two fact tables sharing a date dimension form a loop only when direction is ignored,
+    and that Model imports fine, so it is never flagged. Two joins declared under one
+    entry to the same target are I14's case and keep its id.
+    """
+    graph = JoinGraph(model_tables)
+    findings: list[str] = []
+    for src, dst, edges in graph.parallel_arrows():
+        findings.append(
+            f"I17: {len(edges)} joins run from '{src}' to '{dst}' "
+            f"({', '.join(f'{e.name} under {e.frm}' for e in edges)}) — two routes "
+            f"between one pair, so ThoughtSpot rejects the Model (error 13124, 'Schema "
+            f"validation failed'). A ONE_TO_MANY join points from its with: table back to "
+            f"the table it is declared under. Keep one join, or alias '{dst}' per role."
+        )
+    for cycle in directed_cycles(graph):
+        findings.append(
+            f"I17: the joins form a cycle ({' -> '.join(cycle)}) — ThoughtSpot rejects "
+            f"the Model (error 13123, 'Schema validation failed'). A join graph must not "
+            f"lead back to a table it started from: remove one of these joins, or alias "
+            f"the table the cycle returns to so the second role is a separate node."
+        )
+    for src, target, a, b in ambiguous_paths(graph):
+        findings.append(
+            f"I17: two join paths reach '{target}' from '{src}' "
+            f"({' -> '.join(a)}; {' -> '.join(b)}) — ThoughtSpot rejects the Model "
+            f"(error 13124, 'Schema validation failed'). Alias '{target}' once per role "
+            f"(name: the physical table, alias: a per-role id) and point one path at each."
+        )
+    return findings
+
+
+def _check_self_joins(model_tables: list) -> list[str]:
+    """I18 — a Model may not join a table to itself, aliased or not.
+
+    Rejected in every form probed live (2026-10-21): direct (14565, 'INTERNAL ERROR'),
+    to an alias of itself, and between two aliases of one table (13125). An
+    employee -> manager hierarchy has to be flattened in the warehouse (a view carrying
+    the manager's columns), not modelled as a join.
+    """
+    graph = JoinGraph(model_tables)
+    return [
+        f"I18: join '{e.name}' ({e.frm} -> {e.to}) joins physical table "
+        f"'{graph.physical[e.frm]}' to itself — ThoughtSpot does not support self-joins "
+        f"in a Model, with or without an alias (error 13125 / 14565). Flatten the "
+        f"hierarchy in the warehouse (a view carrying the parent's columns) and join that."
+        for e in graph.edges if graph.is_self_join(e)
+    ]
+
+
+def _check_join_on_tables(model_tables: list) -> list[str]:
+    """I19 — a join's `on:` may name only its two tables, by PHYSICAL name.
+
+    A third table, or an alias name in place of the physical one, is rejected with
+    'Invalid srcTable or destTable in join expression' (live-probed 2026-10-21; the
+    alias case for an ordinary join, not only a self-join). Side order is free —
+    `[TO::x] = [FROM::y]` imports fine, so it is not checked. Joins without an
+    inline `on:` (a `referencing_join` to Table TML) and self-joins (I18) are skipped.
+    """
+    graph = JoinGraph(model_tables)
+    findings: list[str] = []
+    for e in graph.edges:
+        on = e.join.get("on")
+        if not on or graph.is_self_join(e):
+            continue
+        phys_from, phys_to = graph.physical[e.frm], graph.physical[e.to]
+        allowed = {phys_from.lower(), phys_to.lower()}
+        aliases = {e.frm.lower(): phys_from, e.to.lower(): phys_to}
+        for table in on_clause_tables(on):
+            t = table.lower()
+            if t in allowed:
+                continue
+            if t in aliases:
+                findings.append(
+                    f"I19: join '{e.name}' ({e.frm} -> {e.to}) names alias '{table}' in "
+                    f"its on: clause — on: takes PHYSICAL table names; write "
+                    f"'{aliases[t]}' (with: is what selects the alias). ThoughtSpot "
+                    f"rejects this: 'Invalid srcTable or destTable in join expression'."
+                )
+            else:
+                findings.append(
+                    f"I19: join '{e.name}' ({e.frm} -> {e.to}) names '{table}' in its "
+                    f"on: clause, which is neither of its two tables ('{phys_from}', "
+                    f"'{phys_to}') — ThoughtSpot rejects this: 'Invalid srcTable or "
+                    f"destTable in join expression'."
                 )
     return findings
 
@@ -433,12 +530,6 @@ def _check_bare_column_id_single_table(model_tables: list, columns: list) -> lis
     return findings
 
 
-# A bracketed `[TABLE::COL]` reference inside a join `on:` expression. Matches
-# regardless of the surrounding operator (`=`, `>=`, `<`, `and`, ...) — we only
-# need every bracketed structural ref the expression contains.
-_ON_REF_RE = re.compile(r"\[([^\[\]]+?)::([^\[\]]+?)\]")
-
-
 def _check_table_col_ref(
     ref: str,
     context: str,
@@ -505,7 +596,8 @@ def _check_join_targets(
                     f"not exist in schema' on import."
                 )
             on_clause = j.get("on") or ""
-            for table_part, col_part in _ON_REF_RE.findall(on_clause):
+            # every bracketed ref, whatever the operator; server escapes (`dim\.csv`) undone
+            for table_part, col_part in on_clause_refs(on_clause):
                 findings.extend(
                     _check_table_col_ref(
                         f"{table_part}::{col_part}", f"join on '{src_name}'",
