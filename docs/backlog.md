@@ -255,8 +255,9 @@ are roughly ordered by value÷effort.
 | ~~BL-382~~ | ~~The Snowflake from-direction translator (`sv_sql`) does not strip SQL comments: `/* x */` and `-- y` became `/ * [T::X] * /` and `- - [T::Y]`~~ | DONE (2026-10-07 — ts-cli v0.173.0) |
 | BL-395 | Re-run the AgentQL retest suite on 26.9.0.sw and reconcile `limitations.md` (3 tickets fixed only in that release, the regex row) | 2026-11-30 |
 | ~~BL-396~~ | ~~ERD `order-fulfilment` example fails I18/I19: an alias self-join and alias names in 19 `on:` clauses — lint-clean when written, rejected by import~~ | DONE (2026-10-21 — ts-object-model-erd 1.9.3) |
-| BL-397 | Two join shapes import rejects that `ts tml lint` does not check: `MANY_TO_MANY` (14528, and the Power BI converter emits it) and a referencing join under its destination (14504) | 2026-11-30 |
+| ~~BL-397~~ | ~~Two join shapes import rejects that `ts tml lint` does not check: `MANY_TO_MANY` (14528, and the Power BI converter emits it) and a referencing join under its destination (14504)~~ | DONE (2026-10-22 — ts-cli v0.180.0) |
 | ~~BL-398~~ | ~~Sisense picks each join's direction by a tie-broken sort over a `set`: the emitted join graph varies by hash seed, so I17 passes or fails between runs~~ | DONE (2026-10-21 — ts-cli v0.179.0) |
+| BL-399 | ts-audit's assessment profile (Spotter-ready / General) is asked for, stored and never used: every check runs fixed thresholds | 2026-11-30 |
 
 ### Tier 3 — Opportunistic
 
@@ -14333,6 +14334,8 @@ the new rule will start failing its output.
 
 **Target:** 2026-11-30.
 
+**Resolved 2026-10-22:** ts-cli v0.180.0. `ts tml lint` I20 (MANY_TO_MANY Model join) and I21 (`referencing_join` its own Table TML does not declare — cross-file, checked when the Tables are in the batch), from the review probes R13/R14. Power BI and Sisense now leave a many-to-many relationship out and flag it NEEDS REVIEW, pointing at a warehouse bridge table (the user's choice over emitting MANY_TO_ONE, which fans out silently).
+
 ## BL-398 — Sisense join direction depends on set iteration order `Tier 2`
 
 **Filed:** 2026-10-21. **Source:** the independent review of the I17-I19 lint rules.
@@ -14360,3 +14363,27 @@ construction and hash-independent. Reproduced first: the two-fact/shared-dimensi
 6 join sets over 12 seeds (5 tripping I17), and with a snowflaked Category 3 sets (8 tripping);
 after the fix 1 set each, 0 tripping. `test_join_set_identical_across_hash_seeds` builds
 under 12 seeds in subprocesses.
+
+## BL-399 — ts-audit's assessment profile changes nothing `Tier 2`
+
+**Filed:** 2026-10-22. **Source:** building audit check A6 (ts-audit 2.5.0).
+
+**What.** ts-audit Step 2b asks the user to pick an assessment profile — *Spotter-ready*
+("descriptions >= 95%, synonyms >= 80%, AI context required") or *General* ("descriptions
+>= 50%, synonyms >= 25%, AI context recommended") — and says "Store the profile.
+Thresholds are defined in each check function." But `ts audit run` takes no profile
+argument, nothing passes one to `run_audit`, and every check runs one fixed set of
+thresholds: A1 flags below 80% / HIGH below 50%, A2 below 50% / HIGH below 25%, A3 and A4
+are HIGH regardless. `check-catalog.md` repeats the claim ("GREEN/YELLOW/RED by profile",
+"HIGH (Spotter) / MEDIUM (General)"). A user who picks Spotter-ready gets the same report
+as one who picks General, and a Spotter-ready audit passes descriptions at 80% against a
+promised 95%.
+
+**Do.** Either wire it — a `--assessment spotter|general` option on `ts audit run`,
+carried on `AuditContext`, read by A1-A6 (and the H checks the SKILL ties to it), with the
+thresholds in one table rather than in each function — or remove the step and the catalog
+claims so the SKILL stops promising it. Wiring is the better outcome: the two profiles are
+the skill's own framing of who the audit is for. Tests per profile per check; regenerate
+the check catalog rows from the table.
+
+**Target:** 2026-11-30.
