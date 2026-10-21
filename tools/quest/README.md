@@ -73,7 +73,7 @@ one game is a **plugin** in `checks/` that the pack names. Design:
 packs/agentql/{pack,content,strings}.yaml ─┐
 packs/agentql/art/classic/*.txt           ─┤
 lesson-sql.md, learning-path.md (sources) ─┤                   ┌─► quest.json         (the checked data)
-classic/game.html, fonts/                 ─┼─► build.py ───────┼─► quest.schema.json  (generated for this pack)
+classic/game.html, core/*.js, fonts/      ─┼─► build.py ───────┼─► quest.schema.json  (generated for this pack)
 schema/core.json, denylist.txt            ─┤   + checks/*.py   └─► index.html         (self-contained, quest.json inside)
 ```
 
@@ -101,9 +101,18 @@ schema/core.json, denylist.txt            ─┤   + checks/*.py   └─► ind
   - `agentql_rules`: who-put-it-there questions, the three engines, AgentQL as the foe's path,
     and crediting: a who-put-it-there question about a row cap or a null guard must answer
     ThoughtSpot.
-- **`classic/game.html`** is the page, with five placeholders (`__QUEST_DATA__`, `__CLASSIC_ART__`,
-  `__PAGE_TITLE__`, `__PAGE_DESCRIPTION__`, `/*__FONT_FACES__*/`) that `build.py` fills in one
-  pass. It holds no game's wording or art: the build checks the pack holds every string and art
+- **`core/*.js`** is the front-end code every front end shares: plain scripts (not modules) that
+  each add to one `Quest` global, so the classic page inlines them all and the explore page can load
+  them one by one. `10-text.js` (escaping, `S()` and `H()`), `20-rules.js` (gold), `30-progress.js`
+  (saves under `<storage key>-progress`), `40-machine.js` (the rules of play) and `50-sound.js`
+  (effects and music, under `<storage key>-sound`). `Quest.machine(quest).act(state, action,
+  progress)` returns the next state and its effects (sounds to play, gold to save) and draws
+  nothing; an action the current screen doesn't offer is refused and changes nothing, so no front
+  end can skip a step. The actions are `map`, `realm`, `enter`, `hear`, `answer`, `magic`, `next`,
+  `carry`, `fight` and `again`. The build refuses a core file containing `</script` or `<!--`.
+- **`classic/game.html`** is the page, with six placeholders (`/*__QUEST_CORE__*/`, `__QUEST_DATA__`,
+  `__CLASSIC_ART__`, `__PAGE_TITLE__`, `__PAGE_DESCRIPTION__`, `/*__FONT_FACES__*/`) that `build.py`
+  fills in one pass. It draws the machine's state and turns clicks and keys into its actions. It holds no game's wording or art: the build checks the pack holds every string and art
   piece the page reads (from its `S()`, `H()` and `art()` calls), and that every string is used by
   the page, the engine or a plugin, and every art file by the page. The page plays a realm's halls,
   or its one encounter, so a realm may have one or the other. What the page still draws or says
@@ -186,7 +195,7 @@ sources:
 | `expected '…' N time(s) in the SQL` | a whole-statement fact moved, e.g. the fact table is read twice (pruning off) | same: check whether the lesson still holds |
 | `scroll: match '…' hits no line` | a `scroll` substring no longer appears in the AgentQL | update `scroll` |
 | `it asks about a row cap or a null guard, which ThoughtSpot adds` | a who point credits the row cap or a null guard to the Model or the AgentQL | answer `thoughtspot`: both are ThoughtSpot cluster settings |
-| `'…' is a name from a published work` | a word in the pack or the page is on the denylist | use a generic fantasy name |
+| `'…' is a name from a published work` | a word in the pack, the page (`classic/`), `core/`, or the built `quest.json` (often text a plugin took from its sources) is on the denylist | use a generic fantasy name |
 | `denylist: …` | `denylist.txt` is missing, or holds a line that isn't a hash | restore it; add names only with `denylist.py add` |
 | `strings.yaml: the classic page needs '…'` or `art/classic/….txt: the classic page needs it` | the page reads a string or art piece the pack lacks | add it to the pack |
 | `art/classic/….txt: not used` | an art file the page never reads, or a scene for a realm that doesn't exist or has halls (a realm of halls shows its crown) | remove it, or fix its name |

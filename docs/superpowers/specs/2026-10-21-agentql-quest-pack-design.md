@@ -253,7 +253,8 @@ matches the full shape. The Lake's `COALESCE` compiles to a `CASE` with no aggre
 - **Storage:** hashed and normalised (lowercased, accents stripped) single words and two-word
   phrases from published fantasy works. A helper adds entries, so the names themselves are never
   committed.
-- **Scope:** content, strings, maps and `art/classic/`.
+- **Scope:** the whole pack (content, strings, maps, art, promo), the page template (`classic/`),
+  the shared `core/`, and what ships: the built `quest.json` and `quest.schema.json`.
 - **Report:** the offending word from our content, never the list.
 
 The existing test fixture that uses a published place name (`test_quest_build.py`, an unknown
@@ -267,19 +268,19 @@ route realm) is replaced with a made-up name in PR 1.
     any inlined core file containing `</script` or `<!--`, in any case. (`art/classic/` is
     written in as escaped JSON, like the data, so it can't close the element.)
   - Explore: loads the same files with `<script src>`.
-- **The state machine moves out of rendering.** `Quest.act(state, action)` returns the new state
+- **The state machine moves out of rendering.** `Quest.machine(quest).act(state, action, progress)` returns the new state
   plus effects (play a sound, save progress), and `render()` only draws.
   - Today's closures, created while rendering, become named actions.
   - The saves now inside the decree and victory screens become effects of the action that
     finishes a realm.
-  - `Quest.act` enforces the order of steps (merchant, guide, compiler, foe, reward; halls in
+  - `act` enforces the order of steps (merchant, guide, compiler, foe, reward; halls in
     order). An out-of-order interaction is refused with a message and changes nothing. Gates on a
     map are for layout, not correctness.
 - **Sound** moves to `core/`, keyed by the pack's `storage_key` instead of the hard-coded
   `aqq-sound`.
 - **Classic is re-tested on core.** `play_quest.js` keeps driving the page with real clicks and
   keys. Its hooks move from top-level names (`state`, `actions`, `Sound`, `GOLD_WIN`, `GOLD_LOSS`)
-  to the `Quest` global, and it reads v2. Explore's play-through calls `Quest.act` directly (§5).
+  to the `Quest` global, and it reads v2. Explore's play-through calls `act` directly (§5).
 
 ## 4. The explorable front end
 
@@ -444,7 +445,7 @@ kept, and the character can be asked again.
 
 - **The map play-through (node, no canvas):**
   - Read each `.tmj` and build the object graph.
-  - "Walk" it by calling `Quest.act` with an `interact` action per object, in any order the
+  - "Walk" it by calling `act` with an `interact` action per object, in any order the
     gates allow.
   - Answer every question right, wrong-then-right, and with magic, as `play_quest.js` does today.
   - Assert the scores and the saves, and that out-of-order interactions are refused.

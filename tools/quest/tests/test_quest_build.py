@@ -1050,26 +1050,41 @@ def test_the_denylist_hashes_words_and_two_word_names():
 
 @pytest.mark.parametrize("where", ["packs/agentql/content.yaml", "packs/agentql/art/classic/mines",
                                    "packs/agentql/promo/encode_mp4.swift", "packs/agentql/maps/over.TMJ",
-                                   "classic/game.html"])
+                                   "classic/game.html", "core/50-sound.js"])
 def test_a_published_name_anywhere_in_the_pack_or_page_fails_the_build(tmp_path, monkeypatch, where):
-    # Every file but known binaries, any suffix or none, any case; and the classic page itself.
+    # Every file but known binaries, any suffix or none, any case; the classic page itself, and the
+    # core it inlines.
     quest = tmp_path / "quest"
     shutil.copytree(B.PACKS, quest / "packs", ignore=shutil.ignore_patterns("*.png", "*.gif"))
     shutil.copytree(B.TEMPLATE.parent, quest / "classic")
+    shutil.copytree(B.CORE_DIR, quest / "core")
     target = quest / where
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text((target.read_text(encoding="utf-8") if target.exists() else "") + "\n# the zqxvorn\n",
                       encoding="utf-8")
     monkeypatch.setattr(B, "PACKS", quest / "packs")
     monkeypatch.setattr(B, "TEMPLATE", quest / "classic/game.html")
+    monkeypatch.setattr(B, "CORE_DIR", quest / "core")
     _invented(monkeypatch)
     errors = B.build(check=True)[3]
     assert any("'zqxvorn' is a name from a published work" in e for e in errors), errors
 
 
+def test_a_published_name_brought_in_by_a_plugin_fails_the_build(monkeypatch):
+    # Text a plugin takes from its sources ships in quest.json; the folder scans never see it.
+    real = B.compile_pack
+    def compile_with_name(pack, *a, **k):
+        data, errors = real(pack, *a, **k)
+        data["realms"][0]["covers"] += " Beware the zqxvorn."
+        return data, errors
+    monkeypatch.setattr(B, "compile_pack", compile_with_name)
+    _invented(monkeypatch)
+    assert any("quest.json: 'zqxvorn' is a name from a published work" in e for e in B.build(check=True)[3])
+
+
 def test_the_committed_quest_uses_no_listed_name():
     import denylist as D
-    assert D.scan(B.PACKS) == [] and D.scan(B.TEMPLATE.parent) == [] and D.scan(HERE) == []
+    assert D.scan(B.PACKS) == [] and D.scan(B.TEMPLATE.parent) == [] and D.scan(B.CORE_DIR) == [] and D.scan(HERE) == []
 
 
 def test_adding_names_writes_only_hashes(tmp_path):
@@ -1711,20 +1726,24 @@ def test_art_files_drop_one_final_newline_and_need_id_names(tmp_path):
     assert not art["map"].endswith("\n")
 
 
+CORE_TEXT = B.CORE_DIR / "10-text.js"
+
+
+def _node_core_text(expr: str) -> list:
+    """Run core/10-text.js in node, then print JSON.stringify(<expr>)."""
+    js = CORE_TEXT.read_text(encoding="utf-8") + f"\nconsole.log(JSON.stringify({expr}));"
+    out = subprocess.run(["node", "-e", js], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
-def test_wording_is_escaped_then_marked_up(tmp_path):
+def test_wording_is_escaped_then_marked_up():
     # H(): the pack's text is escaped, then *x*, **x** and [x](https://…) become markup; values are
     # escaped and never marked up; S() is plain text.
-    script = B.TEMPLATE.read_text(encoding="utf-8").split("<script>", 1)[1]
-    start, end = script.index("const STRINGS"), script.index("// The throne room")
-    js = (script[script.index("const esc ="):].split("\n", 1)[0] + "\n" + script[start:end].replace(
-        "const STRINGS = QUEST.pack.strings;", "const STRINGS = " + json.dumps({
-            "a": "<b> *hot* **bold** [link](https://example.com/x) [bad](javascript:alert(1)) {v}",
-            "plain": "{v} *not markup in S*"}) + ";"))
-    out = subprocess.run(["node", "-e", js + '\nconsole.log(JSON.stringify([H("a", {v: "*<i>*"}), S("plain", {v: "<x>"})]))'],
-                         capture_output=True, text=True)
-    assert out.returncode == 0, out.stderr
-    h, s = json.loads(out.stdout)
+    strings = {"a": "<b> *hot* **bold** [link](https://example.com/x) [bad](javascript:alert(1)) {v}",
+               "plain": "{v} *not markup in S*"}
+    h, s = _node_core_text(f'(w => [w.H("a", {{v: "*<i>*"}}), w.S("plain", {{v: "<x>"}})])(Quest.wording({json.dumps(strings)}))')
     assert h == ('&lt;b&gt; <span class="hot">hot</span> <b>bold</b> <a href="https://example.com/x">link</a> '
                  '[bad](javascript:alert(1)) *&lt;i&gt;*')
     assert s == "<x> *not markup in S*"
@@ -1839,12 +1858,8 @@ def test_placeholder_names_in_pack_text_are_never_filled(doc, capture):
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
 def test_fill_takes_values_literally_and_only_its_own():
-    script = B.TEMPLATE.read_text(encoding="utf-8").split("<script>", 1)[1]
-    line = next(x for x in script.splitlines() if x.startswith("const fill ="))
-    js = line + '\nconsole.log(JSON.stringify([fill("{a} {a} {b} {constructor} {toString}", {a: "$& $1"})]))'
-    out = subprocess.run(["node", "-e", js], capture_output=True, text=True)
-    assert out.returncode == 0, out.stderr
-    assert json.loads(out.stdout) == ["$& $1 $& $1 {b} {constructor} {toString}"]
+    assert _node_core_text('[Quest.fill("{a} {a} {b} {constructor} {toString}", {a: "$& $1"})]') == [
+        "$& $1 $& $1 {b} {constructor} {toString}"]
 
 
 def test_art_keeps_its_trailing_spaces():
@@ -1858,7 +1873,7 @@ def test_the_build_keeps_arts_trailing_spaces():
 
 
 @pytest.mark.parametrize("mark", [B.PLACEHOLDER, B.FONT_PLACEHOLDER, B.ART_PLACEHOLDER, B.TITLE_PLACEHOLDER,
-                                  B.DESCRIPTION_PLACEHOLDER])
+                                  B.DESCRIPTION_PLACEHOLDER, B.CORE_PLACEHOLDER])
 def test_render_needs_every_placeholder_exactly_once(mark):
     template = B.TEMPLATE.read_text(encoding="utf-8")
     for broken in (template.replace(mark, ""), template.replace(mark, mark + mark)):
@@ -1871,34 +1886,33 @@ def test_wording_in_attributes_is_escaped():
     assert 'aria-label="${esc(S("legend_label"))}"' in B.TEMPLATE.read_text(encoding="utf-8")
 
 
-# ---- PR 2b review, round 2: the smoke play must finish every realm --------------------------------
-
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
-@pytest.mark.parametrize("break_it,needle", [
+@pytest.mark.parametrize("where,old,new,needle", [
     # victory's "Back to the map" leads nowhere: the old smoke play looped and passed
-    (lambda h: h.replace('${choices([{ label: S("back_to_map"), go: toMap }, { label: S("quest_again")',
-                         '${choices([{ label: S("back_to_map"), go: go({ screen: "quest", enc: 0, step: 0, gold: 0, flash: null }) }, { label: S("quest_again")'),
-     "ran out of steps"),
+    ("page", '{ label: S("back_to_map"), action: MAP_ACTION }, { label: S("quest_again")',
+     '{ label: S("back_to_map"), action: { type: "again" } }, { label: S("quest_again")', "ran out of steps"),
     # the last realm's map entry opens the first realm instead
-    (lambda h: h.replace('go: go({ screen: "realm", realm: i, flash: null })', 'go: go({ screen: "realm", realm: i === REALMS.length - 1 ? 0 : i, flash: null })'),
-     'did not open from the map'),
-    # a realm that returns to the map without finishing (the round-2 hole)
-    (lambda h: h.replace('if (state.step >= e.points.length) state.screen = "victory"; }',
-                         'if (state.step >= e.points.length) state.screen = state.realm === REALMS.length - 1 ? "map" : "victory"; }'),
+    ("page", 'action: { type: "realm", realm: i } };', 'action: { type: "realm", realm: i === REALMS.length - 1 ? 0 : i } };',
+     "did not open from the map"),
+    # a realm that returns to the map without finishing (the round-2 hole), now in the machine
+    ("core", 'if (s.step >= r.encounters[s.enc].points.length) finish("victory");',
+     'if (s.step >= r.encounters[s.enc].points.length) { if (s.realm === realms.length - 1) s.screen = "map"; else finish("victory"); }',
      'left realm "isles" without reaching victory'),
-    (lambda h: h.replace('else if (lastHall) state.screen = "decree";', 'else if (lastHall) state.screen = "map";'),
-     'left realm "law" without reaching decree'),
-    (lambda h: h.replace(': go({ screen: "quest", enc: 0, step: 0, gold: 0, flash: null });',
-                         ': go({ screen: "quest", realm: 1, enc: 0, step: 0, gold: 0, flash: null });'),
-     'left realm "lake" without reaching victory'),
+    ("core", 'else if (lastHall) finish("decree");', 'else if (lastHall) s.screen = "map";', 'left realm "law" without reaching decree'),
+    ("core", ': { screen: "quest", enc: 0, step: 0, gold: 0, flash: null });',
+     ': { screen: "quest", realm: 1, enc: 0, step: 0, gold: 0, flash: null });', 'left realm "lake" without reaching victory'),
 ])
-def test_the_smoke_play_fails_a_realm_it_cannot_finish(tmp_path, break_it, needle):
-    template = B.TEMPLATE.read_text(encoding="utf-8")
-    broken = break_it(template)
-    assert broken != template
+def test_the_smoke_play_fails_a_realm_it_cannot_finish(tmp_path, where, old, new, needle):
+    template, core = B.TEMPLATE.read_text(encoding="utf-8"), B.core_script()
+    if where == "page":
+        assert template.count(old) == 1, old
+        template = template.replace(old, new)
+    else:
+        assert core.count(old) == 1, old
+        core = core.replace(old, new)
     data, _ = B.compile_pack(B.Pack("agentql"))
     page = tmp_path / "index.html"
-    page.write_text(B.render(broken, data, "", ART), encoding="utf-8")
+    page.write_text(B.render(template, data, "", ART, core), encoding="utf-8")
     r = subprocess.run(["node", str(HERE / "smoke_page.js"), str(page)], capture_output=True, text=True)
     assert r.returncode != 0 and needle in r.stderr, r.stdout + r.stderr
 
@@ -1947,7 +1961,7 @@ def test_a_sealed_realm_may_have_a_scene(doc, capture):
 
 
 def test_placeholder_names_anywhere_in_the_pack_are_never_filled(doc, capture):
-    marks = " ".join([B.PLACEHOLDER, B.ART_PLACEHOLDER, B.TITLE_PLACEHOLDER, B.DESCRIPTION_PLACEHOLDER, B.FONT_PLACEHOLDER, r"\1 \g<0> $&"])
+    marks = " ".join([B.PLACEHOLDER, B.ART_PLACEHOLDER, B.TITLE_PLACEHOLDER, B.DESCRIPTION_PLACEHOLDER, B.FONT_PLACEHOLDER, B.CORE_PLACEHOLDER, r"\1 \g<0> $&"])
     data, _ = _compile(doc, capture)
     data["pack"]["title"] = data["pack"]["strings"]["page_description"] = marks
     html = B.render(B.TEMPLATE.read_text(encoding="utf-8"), data, "FONTS", dict(ART, title=marks))
@@ -1959,14 +1973,12 @@ def test_placeholder_names_anywhere_in_the_pack_are_never_filled(doc, capture):
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
 def test_the_soon_marker_comes_from_the_pack():
-    script = B.TEMPLATE.read_text(encoding="utf-8").split("<script>", 1)[1]
-    lines = script.splitlines()
-    take = lambda start: "\n".join(lines[lines.index(next(x for x in lines if x.startswith(start))):][:5])
-    js = "\n".join([next(x for x in lines if x.startswith("const esc =")), next(x for x in lines if x.startswith("const fill =")),
-                    'const STRINGS = {"soon_marker": "Soon:"};', next(x for x in lines if x.startswith("const S =")),
-                    take("function cell(c)")])
-    out = subprocess.run(["node", "-e", js + '\nconsole.log(JSON.stringify([cell("Pin it. Soon: tomorrow"), cell("Coming soon: x")]))'],
-                         capture_output=True, text=True)
+    lines = B.TEMPLATE.read_text(encoding="utf-8").split("<script>", 1)[1].splitlines()
+    start = lines.index(next(x for x in lines if x.startswith("function cell(c)")))
+    js = (CORE_TEXT.read_text(encoding="utf-8") + '\nconst esc = Quest.esc, { S } = Quest.wording({"soon_marker": "Soon:"});\n'
+          + "\n".join(lines[start:start + 5])
+          + '\nconsole.log(JSON.stringify([cell("Pin it. Soon: tomorrow"), cell("Coming soon: x")]))')
+    out = subprocess.run(["node", "-e", js], capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     assert json.loads(out.stdout) == ['Pin it. <span class="soon">Soon:</span> tomorrow', "Coming soon: x"]
 
@@ -2022,3 +2034,325 @@ def test_a_broken_trial_does_not_also_report_its_strings_unused(tmp_path, monkey
     errors = B.build(check=True)[3]
     assert any("kind must be one of" in e for e in errors)
     assert not any("is not used by the page" in e for e in errors), errors
+
+
+# ---- PR 3: the shared core (core/*.js) and the state machine ------------------------------------
+
+def _node_core(js: str, data: dict | None = None):
+    """Run every core/*.js in node with QUEST set to the AgentQL pack's data, then `js`; returns
+    what it prints as JSON."""
+    data = data if data is not None else B.compile_pack(B.Pack("agentql"))[0]
+    prelude = "globalThis.localStorage = { s: {}, getItem(k) { return this.s[k] ?? null; }, setItem(k, v) { this.s[k] = v; } };\n"
+    src = prelude + B.core_script() + f"\nconst QUEST = {json.dumps(data)};\n" + js
+    out = subprocess.run(["node", "-e", src], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_the_machine_refuses_what_a_screen_does_not_offer():
+    got = _node_core("""
+      const m = Quest.machine(QUEST), at = (screen, extra = {}) => Object.assign(m.fresh(), { screen }, extra);
+      const tries = [
+        [at("title"), { type: "answer", option: 0 }],
+        [at("map"), { type: "realm", realm: QUEST.realms.length }],
+        [at("map"), { type: "realm", realm: -1 }],
+        [at("map"), { type: "enter" }],
+        [at("realm", { realm: 1 }), { type: "enter" }],                     // locked until the first realm is done
+        [at("battle", { realm: 1 }), { type: "answer", option: 99 }],
+        [at("battle", { realm: 1 }), { type: "next" }],                     // nothing to move on from yet
+        [at("battle", { realm: 1, flash: { kind: "loss", amount: 0 } }), { type: "answer", option: 0 }],
+        [at("guide", { realm: 1 }), { type: "fight" }],                      // the compiler comes first
+        [at("decree"), { type: "again" }],
+        [at("title"), null],
+        [at("title"), { type: "teleport" }],
+        [at("nowhere"), { type: "map" }],                                   // a screen the machine doesn't know
+        [at("battle", { realm: 1 }), { type: "answer", option: QUEST.realms[1].encounters[0].points[0].options.length }],
+        [at("trials", { realm: 0 }), { type: "answer", option: QUEST.realms[0].halls[0].trials[0].options.length }],
+        [at("quest", { realm: 1 }), { type: "answer", option: QUEST.realms[1].encounters[0].path.options.length }],
+      ];
+      console.log(JSON.stringify(tries.map(([s, a]) => { const o = m.act(s, a, {}); return [!!o.refused, o.state === s, o.effects.length]; })));
+    """)
+    assert got == [[True, True, 0]] * 16
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_the_machine_plays_the_whole_game_without_a_page():
+    # What the explore front end will do: drive Quest.machine directly. Every realm is reachable and
+    # finishable; finishing saves before the fanfare; a tie with the best is not a record.
+    got = _node_core("""
+      const m = Quest.machine(QUEST), prog = Quest.progress(QUEST.realms, QUEST.pack.storage_key);
+      let s = m.fresh(); const log = [];
+      const go = a => { const o = m.act(s, a, prog.load()); if (o.refused) throw new Error(o.refused + " " + JSON.stringify(a));
+        s = o.state; for (const fx of o.effects) { log.push(fx.type === "sound" ? fx.name : "save:" + fx.realm); if (fx.type === "save") prog.finish(fx.realm, fx.gold); } };
+      const play = i => {
+        if (s.screen !== "map") go({ type: "map" });
+        go({ type: "realm", realm: i }); go({ type: "enter" });
+        for (let n = 0; n < 200 && !["decree", "victory"].includes(s.screen); n++) {
+          if (s.screen === "hall") go({ type: "hear" });
+          else if (s.screen === "guide") go({ type: "carry" });
+          else if (s.screen === "compiler") go({ type: "fight" });
+          else if (s.flash) go({ type: "next" });
+          else go({ type: "answer", option: m.question(s).correct });
+        }
+        return [s.screen, s.gold, s.record];
+      };
+      go({ type: "map" });
+      const first = QUEST.realms.map((r, i) => play(i));
+      const again = play(1);     // the same gold again: a tie, not a record
+      console.log(JSON.stringify({ first, again, saves: log.filter(x => x.startsWith("save")).length,
+        order: log.slice(log.indexOf("save:law"), log.indexOf("save:law") + 2), courseDone: prog.courseDone() }));
+    """)
+    assert [x[0] for x in got["first"]] == ["decree", "victory", "victory", "victory", "victory"]
+    assert all(x[2] is True for x in got["first"]) and got["again"][2] is False
+    assert got["saves"] == 6 and got["order"] == ["save:law", "fanfare"] and got["courseDone"] is True
+
+
+def test_the_machine_rules_and_text_never_touch_the_page_or_storage():
+    for name in ("10-text.js", "20-rules.js", "40-machine.js"):
+        text = (B.CORE_DIR / name).read_text(encoding="utf-8")
+        for word in ("document", "localStorage", "window", "innerHTML", "AudioContext"):
+            assert word not in text, (name, word)
+
+
+def test_the_core_carries_no_agentql_wording():
+    core = B.core_script()
+    for word in ("AgentQL", "ThoughtSpot", "Wizard", "Forge", "Dragon", "dragon", "Kingdom of Law", "Spotter", "merchant"):
+        assert word not in core, word
+
+
+@pytest.mark.parametrize("bad", ["x = '</script>';", "// <!-- a comment", "x = '</SCRIPT >';"])
+def test_the_build_refuses_core_code_that_could_break_the_page(tmp_path, monkeypatch, bad):
+    core = tmp_path / "core"
+    shutil.copytree(B.CORE_DIR, core)
+    (core / "60-bad.js").write_text(bad + "\n", encoding="utf-8")
+    monkeypatch.setattr(B, "CORE_DIR", core)
+    assert any("core/60-bad.js contains </script or <!--" in e for e in B.build(check=True)[3])
+
+
+def test_the_core_is_inlined_in_name_order(tmp_path):
+    core = tmp_path / "core"
+    core.mkdir()
+    for name in ("20-b.js", "10-a.js", "30-c.js", ".#10-a.js", "notes.txt"):   # an editor's lock file and a non-script
+        (core / name).write_text(f"var x = '{name}';\n", encoding="utf-8")
+    (core / "40-dir.js").mkdir()                                                 # a folder named like a script
+    (core / "50-gone.js").symlink_to(core / "missing.js")                        # a dangling link
+    script = B.core_script(core)
+    assert [p.name for p in B.core_files(core)] == ["10-a.js", "20-b.js", "30-c.js"]   # and no crash
+    assert script.index("'10-a.js'") < script.index("'20-b.js'") < script.index("'30-c.js'")
+    assert ".#10-a.js" not in script and "notes.txt" not in script
+    assert [p.name for p in B.core_files()][0] == "10-text.js"
+
+
+def test_the_core_may_write_a_closing_script_tag_escaped(tmp_path):
+    core = tmp_path / "core"
+    core.mkdir()
+    (core / "10-a.js").write_text("var x = '<\\/script>';\n", encoding="utf-8")
+    assert "<\\/script>" in B.core_script(core)
+
+
+# ---- the machine and the page agree (review of PR 3) --------------------------------------------
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+@pytest.mark.parametrize("variant", ["plain", "sealed", "sealed_first", "onehall"])
+def test_the_page_draws_exactly_what_the_machine_accepts(tmp_path, variant):
+    # Every state x save, and a gate drawn under one save then pressed under another (a second tab).
+    page = tmp_path / "index.html"
+    assert B.main(["--out", str(page)]) == 0
+    r = subprocess.run(["node", str(HERE / "drawn_vs_accepted.js"), str(page), variant], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr[-3000:]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+@pytest.mark.parametrize("old,new", [
+    ("s.gate && s.gate.realm === s.realm ? s.gate.locked", "false ? s.gate.locked"),   # the gate read afresh on each press
+    ("          s.gate = { realm: s.realm, locked: locked(s, progress) };\n", ""),       # ...or never recorded
+    ("if (r.sealed) return a.type === \"map\";", "if (r.sealed) return a.type === \"map\" || a.type === \"enter\";"),
+    ("&& a.option < question(s).options.length);", "&& a.option <= question(s).options.length);"),
+])
+def test_the_agreement_check_catches_a_drifting_machine(tmp_path, old, new):
+    core = tmp_path / "core"
+    shutil.copytree(B.CORE_DIR, core)
+    f = core / "40-machine.js"
+    assert f.read_text(encoding="utf-8").count(old) == 1, old
+    f.write_text(f.read_text(encoding="utf-8").replace(old, new), encoding="utf-8")
+    data, _ = B.compile_pack(B.Pack("agentql"))
+    page = tmp_path / "index.html"
+    page.write_text(B.render(B.TEMPLATE.read_text(encoding="utf-8"), data, "", ART, B.core_script(core)), encoding="utf-8")
+    runs = [subprocess.run(["node", str(HERE / "drawn_vs_accepted.js"), str(page), v], capture_output=True, text=True)
+            for v in ("plain", "sealed")]
+    # Caught by a real mismatch, not by the page failing to run.
+    assert any(re.search(r"FAIL: [1-9]\d* mismatches", r.stderr) for r in runs), [r.stderr[-500:] for r in runs]
+
+
+RETURNING = r"""
+const fs = require("fs"), vm = require("vm");
+const html = fs.readFileSync(process.argv[1], "utf8");
+const block = id => html.split(`<script id="${id}" type="application/json">`)[1].split("</script>")[0];
+const js = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].pop()[1];
+const Q = JSON.parse(block("quest-data")), listeners = {};
+const store = { [`${Q.pack.storage_key}-progress`]: JSON.stringify({ [Q.realms[0].id]: { done: true, best: 999 } }) };
+const el = () => ({ textContent: "", setAttribute() {} }), screen = { innerHTML: "", querySelector: () => null };
+const els = { "quest-data": { textContent: block("quest-data") }, "classic-art": { textContent: block("classic-art") },
+              live: el(), "sound-sfx": el(), "sound-music": el() };
+const ctx = vm.createContext({
+  document: { getElementById: id => els[id] || screen, hidden: false, addEventListener: (t, fn) => { (listeners[t] = listeners[t] || []).push(fn); } },
+  localStorage: { getItem: k => store[k] ?? null, setItem: (k, v) => { store[k] = String(v); } },
+  setInterval: () => 1, clearInterval: () => {}, JSON, String, Number, parseInt, Object, Array, Math });
+vm.runInContext(js, ctx);
+const press = n => listeners.keydown.forEach(fn => fn({ key: String(n), preventDefault() {} }));
+const seen = [];
+const st = () => vm.runInContext("Quest.classic.state()", ctx);
+press(1); seen.push(st().screen);                              // title -> map
+press(2); seen.push(st().screen, st().realm);                 // the second realm's gate
+press(1); seen.push(st().screen);                              // take the quest: open, the first realm is done
+console.log(JSON.stringify(seen));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_a_returning_player_can_take_a_later_quest(tmp_path):
+    # The page must pass the saved progress to the machine: with {} every later gate is locked.
+    page = tmp_path / "index.html"
+    assert B.main(["--out", str(page)]) == 0
+    r = subprocess.run(["node", "-e", RETURNING, str(page)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == ["map", "realm", 1, "quest"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_the_machine_never_changes_what_it_is_given_and_names_its_sounds():
+    # Every state and action deep-frozen: act() must copy. And which sound each action plays.
+    got = _node_core("""
+      "use strict";
+      const freeze = o => { if (o && typeof o === "object") { Object.values(o).forEach(freeze); Object.freeze(o); } return o; };
+      const m = Quest.machine(QUEST), prog = freeze({ [QUEST.realms[0].id]: { done: true, best: 0 } });
+      const sounds = {};
+      let s = freeze(m.fresh()), n = 0;
+      const go = a => { const o = m.act(s, freeze(a), prog); if (o.refused) throw new Error(o.refused);
+        const key = a.type + (a.type === "answer" ? ":" + (o.state.flash && o.state.flash.kind) : "");
+        const names = o.effects.filter(f => f.type === "sound").map(f => f.name).join("+");
+        (sounds[key] = sounds[key] || new Set()).add(names);
+        s = freeze(o.state); n++; };
+      go({ type: "map" });
+      for (let i = 0; i < QUEST.realms.length; i++) {
+        if (QUEST.realms[i].sealed) continue;
+        go({ type: "realm", realm: i }); go({ type: "enter" });
+        for (let k = 0; k < 300 && !["decree", "victory"].includes(s.screen); k++) {
+          if (s.screen === "hall") go({ type: "hear" });
+          else if (s.screen === "guide") go({ type: "carry" });
+          else if (s.screen === "compiler") go({ type: "fight" });
+          else if (s.flash) go({ type: "next" });
+          else { const q = m.question(s); const wrong = (q.correct + 1) % q.options.length;
+                 go(k % 3 === 0 ? { type: "magic" } : { type: "answer", option: k % 3 === 1 && s.screen !== "quest" ? wrong : q.correct ?? 0 }); }
+        }
+        if (s.screen === "victory" && i === QUEST.realms.length - 1) { go({ type: "again" }); break; }
+        go({ type: "map" });
+      }
+      console.log(JSON.stringify({ n, sounds: Object.fromEntries(Object.entries(sounds).map(([k, v]) => [k, [...v].sort()])) }));
+    """)
+    assert got["n"] > 100
+    assert got["sounds"] == {
+        "map": ["blip"], "realm": ["blip"], "enter": ["blip"], "hear": ["blip"], "carry": ["blip"],
+        "fight": ["blip"], "again": ["blip"], "magic": ["magic"],
+        "answer:win": ["coin"], "answer:loss": ["steal"], "next": ["", "fanfare"],
+    }
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_the_machine_keeps_a_gate_as_it_was_opened():
+    got = _node_core("""
+      const m = Quest.machine(QUEST), first = QUEST.realms[0].id, done = { [first]: { done: true, best: 0 } };
+      const gate = p => m.act(m.act(m.fresh(), { type: "map" }, p).state, { type: "realm", realm: 1 }, p).state;
+      const shut = gate({}), open = gate(done);
+      console.log(JSON.stringify([
+        shut.gate.locked, !!m.act(shut, { type: "enter" }, done).refused, !m.act(shut, { type: "realm", realm: 0 }, done).refused,
+        open.gate.locked, !m.act(open, { type: "enter" }, {}).refused,
+        m.act(open, { type: "map" }, {}).state.gate,                                   // the map forgets it
+        m.act(m.act(shut, { type: "map" }, done).state, { type: "realm", realm: 1 }, done).state.gate.locked,
+        m.locked(Object.assign({}, shut, { realm: 0 }), {}),                            // moved by hand: judged afresh
+        m.act(shut, { type: "realm", realm: 0 }, {}).state.gate.locked,                 // "travel to" the first realm
+      ]));
+    """)
+    assert got == [True, True, True, False, True, None, False, False, False]
+
+
+
+# ---- what a player sees, pinned without the live recordings (review of PR 3, S1) ----------------
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_replays_and_saves_keep_the_rules():
+    got = _node_core("""
+      const m = Quest.machine(QUEST), law = QUEST.realms[0].id, mines = QUEST.realms[1].id;
+      const at = (screen, extra = {}) => Object.assign(m.fresh(), { screen }, extra);
+      const out = {};
+      out.againGold = m.act(at("victory", { realm: 1, gold: 40, step: 9 }), { type: "again" }, {}).state;
+      out.enterHall = m.act(at("realm", { realm: 0, hall: 1, step: 2, gold: 7 }), { type: "enter" }, {}).state;
+      // Finishing the first realm opens the rest for this visit even when the save can't be written.
+      out.firstDone = m.locked(at("realm", { realm: 1, firstDone: true }), {});
+      const p = Quest.progress(QUEST.realms, "t");
+      p.finish(mines, 30); const rec = p.finish(mines, 10);
+      out.best = p.load()[mines].best; out.lowerIsRecord = rec;
+      out.courseAfterOne = p.courseDone();
+      localStorage.setItem("t-progress", JSON.stringify({ [law]: true }));   // a save from before { done, best }
+      out.legacy = p.load()[law];
+      out.legacyOpens = !m.locked(at("realm", { realm: 1 }), p.load());
+      console.log(JSON.stringify(out));
+    """)
+    assert (got["againGold"]["gold"], got["againGold"]["step"], got["againGold"]["screen"]) == (0, 0, "quest")
+    assert (got["enterHall"]["hall"], got["enterHall"]["step"], got["enterHall"]["gold"]) == (0, 0, 0)
+    assert got["firstDone"] is False
+    assert got["best"] == 30 and got["lowerIsRecord"] is False and got["courseAfterOne"] is False
+    assert got["legacy"] == {"done": True, "best": 0} and got["legacyOpens"] is True
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_the_treasury_counts_open_realms_only():
+    data, _ = B.compile_pack(B.Pack("agentql"))
+    data["realms"][2]["sealed"] = True
+    got = _node_core("""
+      const p = Quest.progress(QUEST.realms, "t");
+      QUEST.realms.forEach((r, i) => p.finish(r.id, 10 * (i + 1)));
+      console.log(JSON.stringify([p.treasury(), p.courseDone()]));
+    """, data)
+    assert got == [10 + 20 + 40 + 50, True]
+
+
+MAP_AND_FOCUS = r"""
+const fs = require("fs"), vm = require("vm");
+const html = fs.readFileSync(process.argv[1], "utf8");
+const block = id => html.split(`<script id="${id}" type="application/json">`)[1].split("</script>")[0];
+const js = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].pop()[1];
+const Q = JSON.parse(block("quest-data")), listeners = {}, store = {};
+if (process.argv[2] === "first_done") store[`${Q.pack.storage_key}-progress`] = JSON.stringify({ [Q.realms[0].id]: { done: true, best: 0 } });
+const focused = [];
+const button = { focus: () => focused.push(true) };
+const el = () => ({ textContent: "", setAttribute() {} }), screen = { innerHTML: "", querySelector: q => (q === ".choices button" ? button : null) };
+const els = { "quest-data": { textContent: block("quest-data") }, "classic-art": { textContent: block("classic-art") },
+              live: el(), "sound-sfx": el(), "sound-music": el() };
+const ctx = vm.createContext({
+  document: { getElementById: id => els[id] || screen, hidden: false, addEventListener: (t, fn) => { (listeners[t] = listeners[t] || []).push(fn); } },
+  localStorage: { getItem: k => store[k] ?? null, setItem: (k, v) => { store[k] = String(v); } },
+  setInterval: () => 1, clearInterval: () => {}, JSON, String, Number, parseInt, Object, Array, Math });
+vm.runInContext(js, ctx);
+const press = k => listeners.keydown.forEach(fn => fn({ key: String(k), preventDefault() {} }));
+const before = focused.length;
+press(1);                                                    // title -> map
+const mapHtml = screen.innerHTML, after = focused.length;
+press(9);                                                    // beyond the buttons: nothing happens
+console.log(JSON.stringify({ mapHtml, focusedOnDraw: after > before, still: screen.innerHTML === mapHtml && focused.length === after }));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+@pytest.mark.parametrize("save", ["fresh", "first_done"])
+def test_the_map_marks_and_focus_follow_the_save(tmp_path, save):
+    page = tmp_path / "index.html"
+    assert B.main(["--out", str(page)]) == 0
+    r = subprocess.run(["node", "-e", MAP_AND_FOCUS, str(page), save], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    got = json.loads(r.stdout)
+    strings = json.loads((tmp_path / "quest.json").read_text(encoding="utf-8"))["pack"]["strings"]
+    after_first = strings["mark_after_first"].split("{")[0].strip() or strings["mark_after_first"]
+    assert (after_first in got["mapHtml"]) == (save == "fresh")
+    assert got["focusedOnDraw"] and got["still"]
