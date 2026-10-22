@@ -74,7 +74,7 @@ packs/agentql/{pack,content,strings}.yaml ─┐
 packs/agentql/art/classic/*.txt           ─┤
 lesson-sql.md, learning-path.md (sources) ─┤                   ┌─► quest.json         (the checked data)
 classic/game.html, core/*.js, fonts/      ─┼─► build.py ───────┼─► quest.schema.json  (generated for this pack)
-schema/core.json, denylist.txt            ─┤   + checks/*.py   └─► index.html         (self-contained, quest.json inside)
+schema/core.json, denylist.txt            ─┤   + checks/*.py   └─► the classic page   (self-contained, quest.json inside)
 ```
 
 - **`packs/agentql/pack.yaml`**, the manifest: the id, title, Pages folder (`agentql-quest`), save
@@ -131,7 +131,7 @@ schema/core.json, denylist.txt            ─┤   + checks/*.py   └─► ind
   their SIL Open Font License files.
 
 ```bash
-python3 tools/quest/build.py                             # → tools/quest/dist/{index.html,quest.json,quest.schema.json}
+python3 tools/quest/build.py                             # → tools/quest/dist/: index.html (explore, when it's home), classic/, explore/, quest.json, quest.schema.json
 python3 tools/quest/build.py --check                     # validate only
 python3 tools/validate/check_agentql_quest.py --root .   # the same, as pre-commit and CI run it
 pytest tools/quest/tests -q                              # includes a headless play-through (needs node)
@@ -233,14 +233,23 @@ explore page would read differently from the check:
 finished, every out-of-order interaction is refused, and a test pins that the machine asks for the
 steps in exactly the order `maps.py` walks.
 
-## The explore front end (prototype)
+## The explore front end
 
 When a pack lists `explore.realms`, the build also writes `<page folder>/explore/`: a page where
 you walk the overworld and a realm's map and talk to whoever you stand next to. Every question
 opens in a dialog drawn by the same `core/60-screens.js` as the classic page, and the same
 `Quest.machine` decides what happens, so the two pages keep one save. A portal to a realm without a
-map opens that realm in the classic page (`../#realm=<id>&from=explore`, which starts at its gate
-and shows a link back to the map).
+map opens that realm in the classic page (`#realm=<id>&from=explore`, which starts at its gate
+and shows a link back beside its door).
+
+**The home page.** With `explore: {home: true}` (AgentQL Quest has it, now that every realm has a
+map) the explore page is the pack's home page: the build writes it as `<page folder>/index.html`
+(the same page, with `<base href="explore/">` so its files still load from `explore/`) and moves
+the classic page to `<page folder>/classic/`. Each links to the other ("Play the classic version",
+"Back to the explore map"), and an old link to a classic realm (`#realm=<id>`) at the home page is
+forwarded to `classic/`. Without `home`, the classic page stays the home page and explore lives at
+`explore/`. Once every open realm is done, the overworld says so once ("Every realm complete!",
+with the course score and Elder Wren's portrait).
 
 ```
 explore/index.html, explore.js, engine.js ─┐                 ┌─► explore/index.html, explore.js, engine.js
@@ -248,9 +257,9 @@ core/*.js, core/quest.css, fonts/          ─┼─► build.py ─────
 packs/agentql/tiles/, maps/*.tmj           ─┘                 └─► explore/art.json, tiles.json, tiles/, maps/
 ```
 
-- **The build owns `explore/`:** it marks the folder it writes and replaces only a marked one. It
-  refuses, before writing anything, an `explore/` it didn't write (or a link), and any output in
-  `tools/quest/` other than `dist/`.
+- **The build owns `explore/` (and `classic/` when explore is home):** it marks each folder it
+  writes and replaces only a marked one. It refuses, before writing anything, one it didn't write
+  (or a link), and any output in `tools/quest/` other than `dist/`.
 - **Everything is ours and local:** no third-party code, no outside requests, and under 3 MB
   (about 310 KB today). The page runs on `engine.js` (`Quest.engine`), a small tile engine: it
   draws the map's tile layers and one-tile sprites from the atlas on a 2D canvas, moves the
@@ -276,7 +285,7 @@ packs/agentql/tiles/, maps/*.tmj           ─┘                 └─► expl
 - **The overworld** is a small world (40x14): a plaza with Elder Wren (who says which way each realm's door lies), and a
   door for each realm in its own scene, each with a guard beside it who says in one line what the
   realm is for. Leaving a realm, by its exit, by finishing it, or by the classic page's link back
-  (`explore/#from=<realm>`), puts you back beside its door. The scenes: a
+  (`#from=<realm>`), puts you back beside its door. The scenes: a
   tunnel into a rocky cliff, with rails (the Mines, a dwarf), a library with bookshelves at its door,
   over a moat and a plank bridge between pillars (Law, a wizard), a pier to a small town in the lake
   (the Lake, a fisherman), a tunnel of golden trees (the
@@ -317,7 +326,7 @@ packs/agentql/tiles/, maps/*.tmj           ─┘                 └─► expl
 - **Checks:** the build checks the maps (above) and the tile index; `tests/play_map.js` walks
   each map through the machine with no canvas. In a real browser,
   `python3 tools/quest/tests/smoke_explore.py` builds the site, serves it, and plays each
-  explorable realm in headless Chrome (`explore/#smoke=<realm>`): locked for a fresh player, the
+  explorable realm in headless Chrome (`#smoke=<realm>`, on the home page when explore is home): locked for a fresh player, the
   map loads, every step talked to in order, each gate drawn and solid exactly until its own steps
   are done and pushed against while shut, the locked and talk hints only where they belong, a
   petitioner drawn for each throne with a look, the dialog's portrait (and no ASCII art), "Leave
