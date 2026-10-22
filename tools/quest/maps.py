@@ -14,12 +14,12 @@ such realm, saved by Tiled 1.10 or later as JSON with tilesets embedded. On a ma
         gate     requires=<step id>,<step id>,...   blocks its tiles until those steps are DONE
   - a step id is "<encounter id>:<merchant|guide|compiler|foe|reward>" or "hall:<hall id>".
 
-Only what Phaser 4 and the explore page read the same way: an orthogonal, finite map; layers at
-the top level (no groups) with no offsets: tile layers `floor` and `walls`, the map's size, and one
-object layer `objects`; one embedded tileset named `tiles`; unrotated rectangle objects (not tile
-objects, which Tiled and Phaser anchor differently), each exactly one tile on the grid (the explore
-page gives each a 16px body at its centre); tiles of 16px; a wall all round the edge (the page
-doesn't stop the player at the map's edge).
+Only what a tile engine and the explore page read the same way: an orthogonal, finite map; layers at
+the top level (no groups) with no offsets: tile layers `floor` and `walls` and, if it likes, `decor`
+(drawn, never blocking), the map's size, and one object layer `objects`; one embedded tileset named
+`tiles`; unrotated rectangle objects (not tile objects, which Tiled anchors differently),
+each exactly one tile on the grid (the explore page gives each a 16px body at its centre); tiles of
+16px; a wall all round the edge (the page doesn't stop the player at the map's edge).
 
 An object sits on the tile containing its centre.
 Everything but the spawn and gates is solid; reaching an object means standing on a walkable tile
@@ -36,9 +36,17 @@ import re
 
 ROLES = ("merchant", "guide", "compiler", "foe", "reward")
 PROPS = {"spawn": set(), "exit": set(), "portal": {"to"}, "throne": {"hall"}, "gate": {"requires"},
+         # for fun, never a step: a chest of loot (or a mimic), a barrel that rolls one tile off a hoard
+         "chest": {"loot"}, "barrel": {"roll"}, "hoard": {"loot"},
+         # someone to talk to, never a step: `look` (tiles.json npcs) and `says` (lines in
+         # strings.yaml) or `about` (a realm, described from its own content)
+         "npc": {"look", "says", "about"},
          **{role: {"encounter"} for role in ROLES}}
 REALM_TYPES = set(PROPS) - {"portal"}
-OVERWORLD_TYPES = {"spawn", "portal", "gate"}
+OVERWORLD_TYPES = {"spawn", "portal", "gate", "chest", "barrel", "hoard", "npc"}
+EXTRAS = ("chest", "barrel", "hoard", "npc")
+ROLLS = {"left": (-1, 0), "right": (1, 0), "up": (0, -1), "down": (0, 1)}
+MIMIC = "mimic"
 OVERWORLD = "overworld"
 IMAGES = (".png",)
 GID = 0x1FFFFFFF   # a tile number without Tiled's flip and rotation flags
@@ -80,6 +88,10 @@ class Map:
 
     def __init__(self, path: pathlib.Path, errors: list[str]):
         self.path, self.name, self.errors = path, f"maps/{path.name}", errors
+        self.items: set[str] = set()     # the pack's loot (tiles/tiles.json), for chests and hoards
+        self.npcs: set[str] = set()      # who an npc can look like (tiles/tiles.json npcs)
+        self.strings: set[str] = set()   # what an npc can say (strings.yaml), and the realms it can tell of
+        self.realm_ids: set[str] = set()
         try:
             self.doc = json.loads(path.read_text(encoding="utf-8"), parse_constant=_not_json)
         except (OSError, ValueError) as e:
@@ -115,14 +127,15 @@ class Map:
             elif layer.get("type") == "tilelayer" and ("compression" in layer or layer.get("encoding", "csv") != "csv"):
                 errors.append(f"{self.name}: tile layer {layer.get('name')!r} must be CSV, with no encoding or compression set")
             elif layer.get("type") == "tilelayer" and (layer.get("x"), layer.get("y")) != (0, 0):
-                errors.append(f"{self.name}: tile layer {layer.get('name')!r} needs x 0 and y 0 (Phaser places it there)")
+                errors.append(f"{self.name}: tile layer {layer.get('name')!r} needs x 0 and y 0 (the explore page draws it there)")
         layers = [l for l in layers if isinstance(l, dict)]
         walls = [l for l in layers if l.get("type") == "tilelayer" and l.get("name") == "walls"]
         if d and len(walls) != 1:
             errors.append(f"{self.name}: needs exactly one tile layer named walls (the collision)")
         tiles = [l for l in layers if l.get("type") == "tilelayer"]
-        if d and sorted(str(l.get("name")) for l in tiles) != ["floor", "walls"]:
-            errors.append(f"{self.name}: needs exactly the tile layers floor and walls (the explore page draws those two)")
+        if d and sorted(str(l.get("name")) for l in tiles) not in (["floor", "walls"], ["decor", "floor", "walls"]):
+            errors.append(f"{self.name}: needs exactly the tile layers floor and walls, and if it likes decor "
+                          f"(the explore page draws those)")
         for l in tiles:
             if (l.get("width"), l.get("height")) != (self.w, self.h):
                 errors.append(f"{self.name}: tile layer {l.get('name')!r} must be the map's size, {self.w}x{self.h}")
@@ -137,6 +150,9 @@ class Map:
                 errors.append(f"{self.name}: the {l.get('name')} layer must be {self.w}x{self.h} tile numbers (CSV, not base64)")
         data = walls[0].get("data") if walls and good(walls[0]) else None
         self.wall = {(i % self.w, i // self.w) for i, g in enumerate(data or []) if g & GID}
+        for l in tiles:
+            if isinstance(l.get("data"), list) and any(isinstance(g, int) and g & ~GID for g in l["data"]):
+                errors.append(f"{self.name}: layer {l.get('name')!r} has flipped or rotated tiles, which the page draws unflipped")
         self.objects = []
         for layer in layers:
             if layer.get("type") != "objectgroup":
@@ -150,7 +166,7 @@ class Map:
                     errors.append(f"{where}: type must be text")
                     continue
                 if "template" in o:
-                    errors.append(f"{where}: uses a Tiled template, which Phaser doesn't resolve; detach it")
+                    errors.append(f"{where}: uses a Tiled template, which the explore page doesn't resolve; detach it")
                 if "class" in o and "type" not in o:
                     errors.append(f"{where}: has a class but no type (saved by Tiled 1.9); save with Tiled 1.10 or later")
                 if not all(k in o and _num(o[k]) and abs(o[k]) < 1e9 for k in ("x", "y", "width", "height")):
@@ -165,11 +181,19 @@ class Map:
                                   f"{self.tw}; snap to grid in Tiled); the explore page gives it a body that size at its centre")
                     continue
                 tile = self._tile(o)
-                if any(x["tile"] == tile for x in self.objects):   # the page could only ever talk to one of them
+                # The page could only ever talk to one of two objects on a tile; a hoard under its
+                # barrel is the one pair that shares (it shows once the barrel has rolled off it).
+                pair = lambda a, b: {a, b} == {"hoard", "barrel"}
+                if any(x["tile"] == tile and not pair(x["type"], o.get("type")) for x in self.objects):
                     errors.append(f"{where}: shares its tile {tile} with another object; give each its own")
                 self.objects.append({"type": o.get("type"), "props": _props(o, where, errors), "where": where,
                                      "tile": tile, "rect": self._rect(o)})
         pack_dir = path.parent.parent.resolve()
+        try:
+            frames = json.loads((pack_dir / "tiles" / "tiles.json").read_text(encoding="utf-8"))
+            self.items, self.npcs = set(frames.get("items") or {}), set(frames.get("npcs") or {})
+        except (OSError, ValueError, AttributeError):
+            pass
         sets = d.get("tilesets") if isinstance(d.get("tilesets"), list) else []
         if d and [t.get("name") if isinstance(t, dict) else None for t in sets] != ["tiles"]:
             errors.append(f"{self.name}: needs exactly one tileset, named tiles (the explore page draws with that one)")
@@ -177,7 +201,7 @@ class Map:
             if not isinstance(ts, dict):
                 errors.append(f"{self.name}: a tileset is not a JSON object")
             elif "source" in ts:
-                errors.append(f"{self.name}: tileset {ts.get('source')!r} is external; embed it (Phaser reads embedded tilesets only)")
+                errors.append(f"{self.name}: tileset {ts.get('source')!r} is external; embed it (the explore page reads embedded tilesets only)")
             elif (ts.get("tilewidth"), ts.get("tileheight")) != (TILE, TILE) or not (
                     isinstance(ts.get("tilecount"), int) and not isinstance(ts.get("tilecount"), bool) and ts["tilecount"] > 0):
                 errors.append(f"{self.name}: tileset {ts.get('name')!r} needs {TILE}x{TILE} tiles and a tilecount")
@@ -186,7 +210,7 @@ class Map:
                 errors.append(f"{self.name}: a tile layer uses a tile past the tileset's {ts['tilecount']}")
             elif "tiles" in ts and not (isinstance(ts["tiles"], list) and all(
                     isinstance(t, dict) and isinstance(t.get("properties", []), list) for t in ts["tiles"])):
-                errors.append(f"{self.name}: tileset {ts.get('name')!r} has per-tile data Phaser can't read")
+                errors.append(f"{self.name}: tileset {ts.get('name')!r} has per-tile data that isn't a list of properties")
             else:
                 image = ts.get("image")
                 try:
@@ -197,10 +221,31 @@ class Map:
                     there = target is not None and target.is_file()
                 except OSError:     # a name too long for the file system, say
                     there = False
+                atlas = (pack_dir / "tiles" / "tiles.png").resolve()
                 if (target is None or not target.is_relative_to(pack_dir) or target.suffix.lower() not in IMAGES
                         or not there):
                     errors.append(f"{self.name}: tileset {ts.get('name')!r} image {image!r} is not in the pack "
                                   f"(a {'/'.join(IMAGES)} file under the pack's folder)")
+                elif target != atlas:   # the page draws tiles/tiles.png whatever the map says
+                    errors.append(f"{self.name}: tileset {ts.get('name')!r} image {image!r} must be ../tiles/tiles.png, "
+                                  "the atlas the explore page draws")
+                elif _png_size(target) is None:
+                    errors.append(f"{self.name}: tileset {ts.get('name')!r} image {image!r} is not a readable PNG")
+                elif _png_size(target) != (ts.get("imagewidth"), ts.get("imageheight")):
+                    errors.append(f"{self.name}: tileset {ts.get('name')!r} says its image is "
+                                  f"{ts.get('imagewidth')}x{ts.get('imageheight')}, but {image} is "
+                                  "{}x{}; reload the image in Tiled".format(*_png_size(target)))
+                size = _png_size(atlas) if atlas.is_file() else None
+                count = (size[0] // TILE) * (size[1] // TILE) if size else 0
+                if ts.get("tilecount") != count or ts.get("columns") != (size[0] // TILE if size else None):
+                    errors.append(f"{self.name}: tileset {ts.get('name')!r} must have tilecount {count} and "
+                                  f"columns {size[0] // TILE if size else '?'}, as tiles/tiles.png does; reload it in Tiled")
+                if ts.get("firstgid") != 1:
+                    errors.append(f"{self.name}: tileset {ts.get('name')!r} needs firstgid 1")
+                for l in tiles:
+                    data = l.get("data") if isinstance(l.get("data"), list) else []
+                    if any(isinstance(g, int) and (g & GID) > count for g in data):
+                        errors.append(f"{self.name}: layer {l.get('name')!r} uses a tile past tiles/tiles.png's {count}")
 
     def _box(self, o: dict) -> tuple[float, float, float, float]:
         x, y, w, h = (float(o.get(k, 0) or 0) for k in ("x", "y", "width", "height"))
@@ -252,7 +297,8 @@ def reachability(m: Map, steps: list[str] | None = None) -> list[str]:
     if len(spawns) != 1:
         return []   # reported by the shape checks
     gates = [(g, requires(g)) for g in m.of("gate")]
-    solid = {o["tile"] for o in m.objects if o["type"] not in ("spawn", "gate")}
+    # A barrel blocks where it stands and where it rolls to: the quest must not care which.
+    solid = {o["tile"] for o in m.objects if o["type"] not in ("spawn", "gate")} | {rolled(b) for b in m.of("barrel")}
     start = spawns[0]["tile"]
     if not m.inside(start) or start in m.wall or start in solid:
         return [f"{spawns[0]['where']}: the spawn is outside the map, in a wall, or on a solid object"]
@@ -287,13 +333,32 @@ def reachability(m: Map, steps: list[str] | None = None) -> list[str]:
                           + (f" (still shut: {'; '.join(shut)})" if shut else ""))
             break       # every later step waits on this one
         done.add(s)
+    # Every bit of fun can be found by the end: chests and barrels where they stand, a hoard once its
+    # barrel has rolled off it (with every gate open).
+    every = {x for g, needs in gates for x in needs}
+    if not errors:
+        late = walk(every)
+        for o in m.of("chest") + m.of("barrel") + m.of("hoard") + m.of("npc"):
+            if not reach(o, late):
+                errors.append(f"{o['where']}: can't be reached, even once the quest is done")
     return errors
+
+
+def rolled(barrel: dict) -> tuple[int, int]:
+    """The tile a barrel rolls to."""
+    dx, dy = ROLLS.get(barrel["props"].get("roll"), (0, 0))
+    return barrel["tile"][0] + dx, barrel["tile"][1] + dy
 
 
 def _shape(m: Map, allowed: set[str], errors: list[str]) -> None:
     for o in m.objects:
         if o["type"] not in allowed:
             errors.append(f"{o['where']}: type must be one of {sorted(allowed)}")
+            continue
+        if o["type"] == "npc":         # look, and one of says / about
+            ok = "look" in o["props"] and set(o["props"]) <= PROPS["npc"] and len(set(o["props"]) & {"says", "about"}) == 1
+            if not ok:
+                errors.append(f"{o['where']}: needs look, and either says or about")
             continue
         missing, extra = PROPS[o["type"]] - set(o["props"]), set(o["props"]) - PROPS[o["type"]]
         if missing or extra:
@@ -309,12 +374,46 @@ def _shape(m: Map, allowed: set[str], errors: list[str]) -> None:
             errors.append(f"{o['where']}: is outside the map")
     if len(m.of("spawn")) != 1:
         errors.append(f"{m.name}: needs exactly one spawn")
+    _extras(m, errors)
     edge = {(x, y) for x in range(m.w) for y in (0, m.h - 1)} | {(x, y) for y in range(m.h) for x in (0, m.w - 1)}
     shut = m.wall | {o["tile"] for o in m.objects if o["type"] not in ("spawn", "gate")}   # walls, or someone solid
     if m.doc and not edge <= shut:
         x, y = min(edge - shut, key=lambda t: (t[1], t[0]))
         errors.append(f"{m.name}: the map's edge must all be wall or someone solid (the explore page doesn't stop the player there); "
                       f"({x}, {y}) isn't")
+
+
+def _extras(m: Map, errors: list[str]) -> None:
+    """Chests, barrels and hoards: loot the pack names, barrels that roll onto open floor, a hoard
+    under each barrel that hides one."""
+    items = m.items
+    for o in m.of("npc"):
+        if o["props"].get("look") not in m.npcs:
+            errors.append(f"{o['where']}: look={o['props'].get('look')!r} is not one of tiles/tiles.json's npcs")
+        says = [x.strip() for x in o["props"].get("says", "").split(",") if x.strip()]
+        if "says" in o["props"] and (not says or any(k not in m.strings for k in says)):
+            errors.append(f"{o['where']}: says={o['props']['says']!r} must name lines in strings.yaml")
+        if "about" in o["props"] and o["props"]["about"] not in m.realm_ids:
+            errors.append(f"{o['where']}: about={o['props']['about']!r} is not a realm")
+    taken = {o["tile"] for o in m.objects if o["type"] != "hoard"}
+    for o in m.of("chest"):
+        loot = o["props"].get("loot", "")
+        if loot != MIMIC and loot not in items:
+            errors.append(f"{o['where']}: loot={loot!r} is not an item in tiles/tiles.json (or {MIMIC!r})")
+    for o in m.of("hoard"):
+        loot = [x.strip() for x in o["props"].get("loot", "").split(",") if x.strip()]
+        if not loot or any(x not in items for x in loot):
+            errors.append(f"{o['where']}: loot={o['props'].get('loot')!r} must name items in tiles/tiles.json")
+        if sum(b["tile"] == o["tile"] for b in m.of("barrel")) != 1:
+            errors.append(f"{o['where']}: a hoard lies under exactly one barrel, on its tile")
+    gate_tiles = {t for g in m.of("gate") for t in g["rect"]}
+    for b in m.of("barrel"):
+        if b["props"].get("roll") not in ROLLS:
+            errors.append(f"{b['where']}: roll must be one of {sorted(ROLLS)}")
+            continue
+        to = rolled(b)
+        if not m.inside(to) or to in m.wall or to in taken - {b["tile"]} or to in gate_tiles or any(rolled(x) == to for x in m.of("barrel") if x is not b):
+            errors.append(f"{b['where']}: rolls {b['props']['roll']} onto {to}, which isn't open floor")
 
 
 def check_realm_map(m: Map, realm: dict) -> list[str]:
@@ -390,12 +489,12 @@ def check_maps(pack_dir: pathlib.Path, data: dict) -> list[str]:
     if OVERWORLD not in present:
         errors.append(f"maps/{OVERWORLD}.tmj: missing (every explorable pack needs an overworld)")
     else:
-        errors += check_overworld(Map(present[OVERWORLD], []), list(realms.values()))
+        errors += check_overworld(_with(Map(present[OVERWORLD], []), data), list(realms.values()))
     for rid in explore:
         if rid not in present:
             errors.append(f"maps/{rid}.tmj: missing (realm {rid} is in explore.realms)")
         elif rid in realms:
-            errors += check_realm_map(Map(present[rid], []), realms[rid])
+            errors += check_realm_map(_with(Map(present[rid], []), data), realms[rid])
     return errors
 
 
@@ -410,3 +509,33 @@ def _tilesets(path: pathlib.Path) -> list[dict]:
 
 def _not_json(name: str):
     raise ValueError(f"{name} is not JSON (the page's JSON.parse rejects it)")
+
+
+def _png_size(path: pathlib.Path) -> tuple[int, int] | None:
+    head = path.read_bytes()[:24]
+    if head[:8] != b"\x89PNG\r\n\x1a\n" or head[12:16] != b"IHDR":
+        return None
+    return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+
+
+def _with(m: Map, data: dict) -> Map:
+    """A map that knows the pack's lines and realms, for its npcs."""
+    m.strings = set(((data.get("pack") or {}).get("strings") or {}))
+    m.realm_ids = {r["id"] for r in data.get("realms") or []}
+    return m
+
+
+def npc_lines(pack_dir: pathlib.Path) -> set[str]:
+    """Every line the pack's npcs say (strings.yaml keys), which the page reads by name."""
+    lines = set()
+    for path in sorted((pack_dir / "maps").glob("*.tmj")) if (pack_dir / "maps").is_dir() else []:
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+            for layer in doc.get("layers") or []:
+                for o in layer.get("objects") or [] if isinstance(layer, dict) else []:
+                    for p in o.get("properties") or [] if isinstance(o, dict) and o.get("type") == "npc" else []:
+                        if isinstance(p, dict) and p.get("name") == "says" and isinstance(p.get("value"), str):
+                            lines |= {x.strip() for x in p["value"].split(",") if x.strip()}
+        except (OSError, ValueError, AttributeError, TypeError):
+            continue    # reported by the map checks
+    return lines

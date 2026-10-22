@@ -64,6 +64,7 @@ import importlib.util
 import json
 import pathlib
 import re
+import shutil
 import sys
 
 import yaml
@@ -87,6 +88,8 @@ PLACEHOLDER = "__QUEST_DATA__"
 FONT_PLACEHOLDER = "/*__FONT_FACES__*/"
 ART_PLACEHOLDER = "__CLASSIC_ART__"
 CORE_PLACEHOLDER = "/*__QUEST_CORE__*/"
+CSS_PLACEHOLDER = "/*__QUEST_CSS__*/"
+CORE_CSS = HERE / "core" / "quest.css"   # the look, shared by the classic and explore pages
 CORE_DIR = HERE / "core"   # shared front-end code: plain scripts, inlined into the classic page in name order
 TITLE_PLACEHOLDER, DESCRIPTION_PLACEHOLDER = "__PAGE_TITLE__", "__PAGE_DESCRIPTION__"
 PAGES = "https://thoughtspot.github.io/thoughtspot-agent-skills"
@@ -801,17 +804,20 @@ def core_script(core_dir: pathlib.Path | None = None) -> str:
     return "\n".join(parts)
 
 
-def render(template: str, data: dict, fonts_css: str = "", art: dict | None = None, core: str | None = None) -> str:
+def render(template: str, data: dict, fonts_css: str = "", art: dict | None = None, core: str | None = None,
+           css: str | None = None) -> str:
     """The classic page: the shared core (core/*.js), the data, the pack's art (art/classic/), its
     title and description and the fonts written into classic/game.html."""
-    for mark in (PLACEHOLDER, FONT_PLACEHOLDER, ART_PLACEHOLDER, TITLE_PLACEHOLDER, DESCRIPTION_PLACEHOLDER, CORE_PLACEHOLDER):
+    for mark in (PLACEHOLDER, FONT_PLACEHOLDER, ART_PLACEHOLDER, TITLE_PLACEHOLDER, DESCRIPTION_PLACEHOLDER, CORE_PLACEHOLDER,
+                 CSS_PLACEHOLDER):
         if template.count(mark) != 1:
             raise ValueError(f"game.html must contain {mark} exactly once")
     pack = data.get("pack") or {}
     values = {PLACEHOLDER: _script_json(data), ART_PLACEHOLDER: _script_json(art or {}),
               TITLE_PLACEHOLDER: _html_text(pack.get("title", "")),
               DESCRIPTION_PLACEHOLDER: _html_text((pack.get("strings") or {}).get("page_description", "")),
-              FONT_PLACEHOLDER: fonts_css, CORE_PLACEHOLDER: core_script() if core is None else core}
+              FONT_PLACEHOLDER: fonts_css, CORE_PLACEHOLDER: core_script() if core is None else core,
+              CSS_PLACEHOLDER: CORE_CSS.read_text(encoding="utf-8") if css is None else css}
     # One pass over the template, so a placeholder's name inside the pack's own text is never filled.
     return re.sub("|".join(re.escape(m) for m in values), lambda m: values[m.group(0)], template)
 
@@ -822,9 +828,134 @@ _STRING_CALL = re.compile(r"\b[SH]\(((?:[^()]|\([^()]*\))*?)[,)]")
 _ART_CALL = re.compile(r'\bart\("([a-z0-9_]+)"')
 
 
-def classic_needs(template: str, core: str | None = None) -> tuple[set[str], set[str]]:
-    """What the page and the core it inlines read from a pack."""
-    script = template.split("<script>", 1)[-1] + "\n" + (core_script() if core is None else core)
+EXPLORE_DIR = HERE / "explore"   # the explore front end: page template and its script
+EXPLORE_BUDGET = 3_000_000       # bytes for the whole explore folder (design §4.6)
+EXPLORE_MARK = ".written-by-build"   # in every explore/ the build writes, so a rebuild only ever replaces its own
+
+
+TILE_NAMES = {"wall", "wall_top", "player", *maps.ROLES, "reward_open", "exit", "gate", "portal", "throne",   # what explore.js draws
+              "chest", "chest_open", "mimic", "barrel", "hoard", "hoard_empty"}
+TILE_TABLES = {"portals", "items", "weapon", "npcs"}   # a door per realm, the loot, the first weapon, who npcs look like
+
+
+def check_tiles(pack: "Pack", data: dict | None = None) -> list[str]:
+    """tiles/tiles.json names a frame of tiles/tiles.png (16px, left to right, top to bottom) for
+    everything the explore page draws."""
+    folder = pack.dir / "tiles"
+    try:
+        frames = json.loads((folder / "tiles.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return [f"tiles/tiles.json: an explorable pack names its tile frames here ({e})"]
+    size = maps._png_size(folder / "tiles.png") if (folder / "tiles.png").is_file() else None
+    if not size or size[0] % 16 or size[1] % 16:
+        return ["tiles/tiles.png: needs a PNG of whole 16px tiles"]
+    count = (size[0] // 16) * (size[1] // 16)
+    frame = lambda v: isinstance(v, int) and not isinstance(v, bool) and 0 <= v < count
+    errors = [f"tiles/tiles.json: needs {k!r}" for k in sorted((TILE_NAMES | TILE_TABLES) - set(frames))]
+    errors += [f"tiles/tiles.json: {k!r} is not used by the explore page" for k in sorted(set(frames) - TILE_NAMES - TILE_TABLES)]
+    for k in sorted(TILE_NAMES & set(frames)):
+        if not frame(frames[k]):
+            errors.append(f"tiles/tiles.json: {k!r} must be a frame of tiles.png, 0 to {count - 1}")
+    portals, items = frames.get("portals"), frames.get("items")
+    npcs = frames.get("npcs")
+    if not isinstance(npcs, dict) or not all(isinstance(k, str) and ID.fullmatch(k) and frame(v) for k, v in npcs.items()):
+        errors.append("tiles/tiles.json: npcs maps a look to its frame")
+    if not isinstance(portals, dict) or not all(isinstance(k, str) and frame(v) for k, v in portals.items()):
+        errors.append("tiles/tiles.json: portals maps a realm id to its door's frame")
+    if not isinstance(items, dict) or not items or not all(
+            isinstance(k, str) and ID.fullmatch(k) and isinstance(v, dict) and set(v) == {"frame", "kind"}
+            and frame(v["frame"]) and v["kind"] in ("weapon", "treasure") for k, v in items.items()):
+        errors.append("tiles/tiles.json: items maps an id to {frame, kind: weapon or treasure}")
+    elif (items.get(frames.get("weapon")) or {}).get("kind") != "weapon":
+        errors.append("tiles/tiles.json: weapon names the weapon item you start with")
+    if isinstance(items, dict) and "mimic" in items:
+        errors.append("tiles/tiles.json: 'mimic' is a chest, not an item")
+    ids = {r["id"] for r in (data or {}).get("realms") or []}
+    if data and isinstance(portals, dict):
+        errors += [f"tiles/tiles.json: portals names {k!r}, which is not a realm" for k in sorted(set(portals) - ids)]
+    return errors
+
+
+def explore_items(pack: "Pack") -> set[str]:
+    """The loot's ids (tiles/tiles.json items): each needs its name, item_<id>, in strings.yaml."""
+    try:
+        items = json.loads((pack.dir / "tiles" / "tiles.json").read_text(encoding="utf-8")).get("items")
+    except (OSError, ValueError, AttributeError):
+        return set()
+    return set(items) if isinstance(items, dict) else set()
+
+
+def _inside(path: pathlib.Path, folder: pathlib.Path) -> bool:
+    """Is `path` (which may not exist yet) `folder` or inside it, the way the file system sees it?
+    Compared by identity, not spelling: on a case-insensitive disk a differently cased name is the same folder."""
+    path = path.resolve()
+    if not folder.exists():
+        return path.is_relative_to(folder.resolve())
+    for p in (path, *path.parents):
+        if p.exists():
+            try:
+                if p.samefile(folder):
+                    return True
+            except OSError:
+                pass
+        elif p.name and p.parent.exists() and any(c.name.casefold() == p.name.casefold() and c.samefile(folder)
+                                                  for c in p.parent.iterdir()):
+            return True
+    return False
+
+
+def out_problems(out: pathlib.Path, explorable: bool) -> list[str]:
+    """Before anything is written: the page's folder isn't one of the engine's own (tools/quest/
+    except its dist/), and an explore/ already there is one this build wrote, not a link."""
+    if _inside(out.parent, HERE) and not _inside(out.parent, HERE / "dist"):
+        return [f"--out: {out.parent} is inside tools/quest/; build into tools/quest/dist/ or somewhere outside"]
+    ex = out.parent / "explore"
+    if explorable and (ex.is_symlink() or (ex.exists() and not (ex / EXPLORE_MARK).is_file())):
+        return [f"explore/: {ex} is already there and isn't a folder this build wrote; move it, or build somewhere else"]
+    return []
+
+
+def write_explore(out_dir: pathlib.Path, pack: "Pack", data: dict, art: dict, fonts_css: str, core: str) -> list[str]:
+    """The explore front end, in <page folder>/explore/: its page, script, the shared core and look,
+    the fonts, the engine, the art, and the pack's tiles and maps. Everything is local.
+    out_problems() has already said it may."""
+    ex = out_dir / "explore"
+    if ex.exists():
+        shutil.rmtree(ex)    # a folder this build wrote (it carries the mark): no files left over
+    (ex / "maps").mkdir(parents=True, exist_ok=True)
+    (ex / EXPLORE_MARK).write_text("Written by tools/quest/build.py, which replaces this folder on every build.\n",
+                                   encoding="utf-8")
+    (ex / "tiles").mkdir(parents=True, exist_ok=True)
+    page = (EXPLORE_DIR / "index.html").read_text(encoding="utf-8")
+    values = {TITLE_PLACEHOLDER: _html_text(pack.title),
+              DESCRIPTION_PLACEHOLDER: _html_text(pack.strings.get("page_description", ""))}
+    (ex / "index.html").write_text(re.sub("|".join(re.escape(m) for m in values), lambda m: values[m.group(0)], page),
+                                   encoding="utf-8")
+    (ex / "explore.js").write_text((EXPLORE_DIR / "explore.js").read_text(encoding="utf-8"), encoding="utf-8")
+    (ex / "core.js").write_text(core, encoding="utf-8")
+    (ex / "quest.css").write_text(CORE_CSS.read_text(encoding="utf-8"), encoding="utf-8")
+    (ex / "fonts.css").write_text(fonts_css, encoding="utf-8")
+    (ex / "fonts").mkdir(exist_ok=True)
+    for f in sorted(FONT_DIR.glob("LICENSE-*.txt")):           # the OFL's text, with the fonts it covers
+        (ex / "fonts" / f.name).write_bytes(f.read_bytes())
+    (ex / "engine.js").write_text((EXPLORE_DIR / "engine.js").read_text(encoding="utf-8"), encoding="utf-8")
+    (ex / "art.json").write_text(json.dumps(art, ensure_ascii=False), encoding="utf-8")
+    (ex / "tiles.json").write_text((pack.dir / "tiles" / "tiles.json").read_text(encoding="utf-8"), encoding="utf-8")
+    for f in (pack.dir / "tiles").iterdir():
+        if f.is_file() and f.suffix.lower() in (".png", ".txt"):
+            (ex / "tiles" / f.name).write_bytes(f.read_bytes())
+    for f in (pack.dir / "maps").glob("*.tmj"):
+        (ex / "maps" / f.name).write_bytes(f.read_bytes())
+    size = sum(f.stat().st_size for f in ex.rglob("*") if f.is_file())
+    return [f"explore/: {size:,} bytes is over the {EXPLORE_BUDGET:,}-byte budget"] if size > EXPLORE_BUDGET else []
+
+
+def classic_needs(template: str, core: str | None = None, explore_page: bool = False) -> tuple[set[str], set[str]]:
+    """What the front ends read from a pack: the classic page, the core it inlines, and, for a pack
+    with explorable realms (`explore_page`), the explore page's script."""
+    js = EXPLORE_DIR / "explore.js"
+    explore = js.read_text(encoding="utf-8") if explore_page and js.is_file() else ""
+    script = template.split("<script>", 1)[-1] + "\n" + (core_script() if core is None else core) + "\n" + explore
     strings = {k for arg in _STRING_CALL.findall(script) for k in re.findall(r'"([a-z0-9_]+)"', arg)}
     return strings | {"page_description"}, set(_ART_CALL.findall(script)) | {"map"}  # the head's description
 
@@ -859,7 +990,11 @@ def check_classic(pack: Pack, data: dict, art: dict, template: str, unused: bool
     """Everything the classic page reads must be in the pack, and the pack's art must all be used.
     `unused`: also refuse strings nothing reads (skipped when the compile already failed, since a
     broken trial can make a used string look unused)."""
-    strings, pieces = classic_needs(template, core)
+    explorable = bool((data.get("pack") or {}).get("explore_realms"))
+    strings, pieces = classic_needs(template, core, explorable)
+    if explorable:
+        strings |= {f"item_{k}" for k in explore_items(pack)}   # read as S(`item_${id}`), which the scan can't see
+        strings |= maps.npc_lines(pack.dir)                     # the lines the maps' npcs say
     scenes = {f"scene_{r['id']}" for r in data.get("realms") or [] if not r["halls"]}  # a realm of halls shows its crown
     errors = [f"strings.yaml: the classic page needs {k!r}" for k in sorted(strings - set(pack.strings))]
     used = strings | engine_strings(pack, load_plugins(pack.manifest.get("checks") or []), data)
@@ -879,6 +1014,9 @@ def _not_json(name: str):
     raise ValueError(f"quest.schema.json: {name} is not JSON (JSON.parse and strict parsers reject it)")
 
 
+BUILT: dict = {}
+
+
 def build(pack_id: str = DEFAULT_PACK, check: bool = False) -> tuple[str | None, dict, dict, list[str]]:
     """Validate, and unless `check`, render. Returns (html or None, data, schema, errors)."""
     pack = Pack(pack_id)
@@ -886,8 +1024,11 @@ def build(pack_id: str = DEFAULT_PACK, check: bool = False) -> tuple[str | None,
     errors += check_packs_unique()
     if data:
         errors += maps.check_maps(pack.dir, data)   # the explore front end's maps (design §4.2)
+        if data["pack"]["explore_realms"]:
+            errors += check_tiles(pack, data)
     try:
-        errors += denylist.scan(pack.dir) + denylist.scan(TEMPLATE.parent) + denylist.scan(CORE_DIR)
+        errors += (denylist.scan(pack.dir) + denylist.scan(TEMPLATE.parent) + denylist.scan(CORE_DIR)
+                   + denylist.scan(EXPLORE_DIR))
     except (OSError, ValueError) as e:  # fails closed: no list, or a list that isn't hashes
         errors.append(f"denylist: {e}")
     schema: dict = {}
@@ -918,6 +1059,7 @@ def build(pack_id: str = DEFAULT_PACK, check: bool = False) -> tuple[str | None,
     except (OSError, ValueError) as e:
         errors.append(f"denylist: {e}")
     html = None if check else render(TEMPLATE.read_text(encoding="utf-8"), data, fonts, art, core)
+    BUILT.update(pack=pack, art=art, fonts=fonts, core=core)   # for main() to write the explore folder
     return html, data, schema, errors
 
 
@@ -953,10 +1095,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{name}: OK ({summary})")
         return 0
     out = pathlib.Path(args.out)
+    problems = out_problems(out, bool(data["pack"]["explore_realms"]))
+    if problems:
+        for e in problems:
+            print(f"{name}: {e}", file=sys.stderr)
+        return 1
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(html, encoding="utf-8")
     out.with_name("quest.json").write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     out.with_name("quest.schema.json").write_text(json.dumps(schema, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if data["pack"]["explore_realms"]:
+        problems = write_explore(out.parent, BUILT["pack"], data, BUILT["art"], BUILT["fonts"], BUILT["core"])
+        if problems:
+            for e in problems:
+                print(f"  - {e}", file=sys.stderr)
+            return 1
     print(f"{name}: wrote {out}, quest.json and quest.schema.json ({summary})")
     return 0
 

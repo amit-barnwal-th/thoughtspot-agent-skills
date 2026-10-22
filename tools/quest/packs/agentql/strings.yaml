@@ -115,3 +115,47 @@ fine_court: THE COURT FINES YOU {amount} GOLD
 fine_foe: THE DRAGON TAKES {amount} GOLD
 empty_court: THE COURT FINDS YOUR PURSE EMPTY
 empty_foe: THE DRAGON FINDS YOUR PURSE EMPTY
+
+# ---- The explore page (explore/), and classic mode's way back to it. ----
+explore_help: Arrow keys walk. Enter or Space talks to whoever, or whatever, you stand next to. X switches weapon. S and M switch sound effects and music.
+explore_classic: Play the classic version
+explore_world: The map. Walk with the arrow keys; talk with Enter or Space.
+explore_close: Close (Esc)
+explore_pad_left: ←
+explore_pad_up: ↑
+explore_pad_down: ↓
+explore_pad_right: →
+explore_pad_talk: Talk
+explore_nobody: There is nobody close enough to talk to.
+explore_not_yet: Not yet. Someone else has something for you first.
+explore_no_canvas: This map couldn't start in this browser. The classic version plays the same quests.
+explore_hud_map: THE REALMS
+explore_hud_gold: "GOLD {gold}/{max}"
+explore_back: Back to the explore map
+explore_near_portal: "{name}{mark}. Press Enter or Space to go in."
+explore_near_sealed: "{name}{mark}."
+explore_pad_weapon: Weapon
+explore_found: "You open the chest: {item}!"
+explore_mimic: "The chest snaps at you. A mimic! Nothing inside but teeth."
+explore_chest_empty: The chest is empty.
+explore_barrel: You roll the barrel aside. Something glints underneath.
+explore_barrel_blocked: The barrel won't roll while you stand where it would go.
+explore_hoard: "A troll's hoard: {items}!"
+explore_hoard_empty: The troll's hoard is empty now.
+explore_weapon: "You ready the {weapon}."
+explore_face_foe: "You face it with your {weapon}."
+explore_hud_kit: "{weapon} · LOOT {n}"
+explore_npc_about: "A traveller: Through that door lies {realm}. {covers}"
+npc_elder_walk: "Elder Wren: The arrow keys walk you about, and Enter or Space talks to whoever is beside you."
+npc_elder_order: "Elder Wren: Each door leads to a realm. Start with the Kingdom of Law; the others open once you have studied there."
+npc_elder_fun: "Elder Wren: X changes your weapon. Chests and barrels hide things, and none of it costs you any gold."
+npc_miner_gate: "Old miner: The gate to the east stays shut until the Forge has done its work."
+npc_miner_barrel: "Old miner: That barrel in the far corner never sat right. Give it a shove."
+item_sword: sword
+item_dagger: dagger
+item_axe: axe
+item_staff: staff
+item_red_potion: red potion
+item_blue_potion: blue potion
+item_green_potion: green potion
+item_shield: shield

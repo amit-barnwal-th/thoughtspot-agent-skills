@@ -185,23 +185,34 @@ end (for example an explorable map) plays the same content by loading `quest.jso
 
 A pack whose `explore.realms` lists realms has a Tiled map for each, plus an overworld:
 `maps/overworld.tmj` and `maps/<realm id>.tmj`, saved by Tiled 1.10 or later as JSON (CSV tile
-data). `maps.py` checks them in the build (design §4.2), and refuses anything Phaser 4 or the
+data). `maps.py` checks them in the build (design §4.2), and refuses anything a tile engine or the
 explore page would read differently from the check:
 
-- **Shape:** orthogonal and finite; layers at the top level, unoffset: tile layers `floor` and
-  `walls` (the map's size) and one object layer `objects`; one embedded tileset named `tiles`
-  whose `.png` is in the pack; 16px tiles; objects are unrotated rectangles (not tile objects or
-  points), each exactly one tile on the grid (snap to grid in Tiled), because the explore page
-  gives each a 16px body at its centre; a wall, or someone solid, all round the edge, because the
-  page doesn't stop the player at the map's edge.
-- **Collision** is the `walls` layer: any non-empty tile blocks.
+- **Shape:** orthogonal and finite; layers at the top level, unoffset: tile layers `floor`,
+  `walls` and, if you like, `decor` (each the map's size) and one object layer `objects`; one
+  embedded tileset named `tiles` whose `.png` is in the pack, at the size the map says; 16px tiles;
+  objects are unrotated rectangles (not tile objects or points), each exactly one tile on the grid
+  (snap to grid in Tiled), because the explore page gives each a 16px body at its centre; a wall,
+  or someone solid, all round the edge, because the page doesn't stop the player at the map's edge.
+- **Collision** is the `walls` layer: any non-empty tile blocks. Paint walls with the wall tile
+  (`tiles.json`'s `wall`): the page shows its brick face where floor is below and its dark top
+  elsewhere. Any other tile on `walls` (a crate, a barrel) is drawn as it is, and blocks.
+- **Decoration** that you can walk past (torches on a wall face, rails, rubble) goes on `decor`.
 - **Objects** have a `type` and string properties only:
   - `spawn`, where the player appears (one per map);
   - `portal to=<realm id>`, overworld only, one per realm;
   - `exit`, realm maps only, one per map;
   - `merchant`, `guide`, `compiler`, `foe`, `reward` with `encounter=<encounter id>`;
   - `throne hall=<hall id>`;
-  - `gate requires=<step id>,…`.
+  - `gate requires=<step id>,…`;
+  - for fun, never a step (realm maps and the overworld): `chest loot=<item>` (or `loot=mimic`),
+    `barrel roll=left|right|up|down`, and `hoard loot=<item>,…` on the same tile as a barrel,
+    hidden until it rolls. Items are `tiles.json`'s `items`; a barrel rolls one tile, onto open
+    floor. The walk treats a barrel as solid where it stands and where it rolls to, so the quest
+    never depends on it, and every chest, barrel and hoard must be reachable once the quest is done;
+  - someone to talk to, also never a step: `npc look=<who>` (`tiles.json`'s `npcs`) with either
+    `says=<line>,…` (keys in `strings.yaml`) or `about=<realm id>` (the realm told from its own
+    name and `covers`, so it stays true as the content changes).
 - **Steps:** a step id is `<encounter id>:<merchant|guide|compiler|foe|reward>` or
   `hall:<hall id>`. Every step of a realm has exactly one object on its map.
 - **Reachability, in the game's order:** the game plays a realm's steps in one order (halls, then
@@ -210,13 +221,71 @@ explore page would read differently from the check:
   object; the exit must be reachable from the start. A gate that only opens after a step behind it,
   or a first step behind a gate, fails. Objects are solid; reaching one means standing on a
   walkable tile next to it.
-- **No Tiled templates,** which Phaser doesn't resolve.
+- **No Tiled templates,** which the explore page doesn't resolve.
 
 `Quest.machine` accepts `interact {step}` only for the step the current screen waits on
 (`expected(state)`), and changes nothing on it, so walking to the foe first does nothing.
 `tests/play_map.js` plays a realm's steps through the machine with no canvas: every step is
 finished, every out-of-order interaction is refused, and a test pins that the machine asks for the
 steps in exactly the order `maps.py` walks.
+
+## The explore front end (prototype)
+
+When a pack lists `explore.realms`, the build also writes `<page folder>/explore/`: a page where
+you walk the overworld and a realm's map and talk to whoever you stand next to. Every question
+opens in a dialog drawn by the same `core/60-screens.js` as the classic page, and the same
+`Quest.machine` decides what happens, so the two pages keep one save. A portal to a realm without a
+map opens that realm in the classic page (`../#realm=<id>&from=explore`, which starts at its gate
+and shows a link back to the map).
+
+```
+explore/index.html, explore.js, engine.js ─┐                 ┌─► explore/index.html, explore.js, engine.js
+core/*.js, core/quest.css, fonts/          ─┼─► build.py ─────┼─► explore/core.js, quest.css, fonts.css
+packs/agentql/tiles/, maps/*.tmj           ─┘                 └─► explore/art.json, tiles.json, tiles/, maps/
+```
+
+- **The build owns `explore/`:** it marks the folder it writes and replaces only a marked one. It
+  refuses, before writing anything, an `explore/` it didn't write (or a link), and any output in
+  `tools/quest/` other than `dist/`.
+- **Everything is ours and local:** no third-party code, no outside requests, and under 3 MB
+  (about 199 KB today). The page runs on `engine.js` (`Quest.engine`), a small tile engine: it
+  draws the map's tile layers and one-tile sprites from the atlas on a 2D canvas, moves the
+  player's 12x12 body against solid tiles and solid sprites (one axis at a time, so it slides along
+  walls), reads the arrow keys on the map, follows the player with the camera, and runs timers,
+  tweens and a fade. Its geometry has no DOM, so node tests drive it. (Phaser was used until it
+  turned out to bundle GPL-3.0 code; design decision 5.)
+- **Tiles** are Kenney's Tiny Dungeon (CC0, `tiles/LICENSE-kenney.txt`): `tiles/tiles.png` is its
+  `tilemap_packed.png` (12x11 frames of 16px) with one row added, of which frame 132, the top of a
+  wall, is ours. `tiles/tiles.json` names the frame for everything the page draws (the wall and its
+  top, the player, the five roles, the open chest, exit, gate, portal); the build checks it. A
+  realm's look is its map's own floor and decoration.
+- **Fun:** talk to a chest to open it (its loot is yours, or a mimic snaps at you), to a barrel to
+  roll it aside, and to the troll's hoard it uncovers to claim it. You start with the weapon
+  `tiles.json` names; others come as loot, and X (or the pad's Weapon) switches the one in your
+  hand, which the foe's first question mentions. Loot never touches gold or the quest: it is saved
+  apart, under `<storage key>-explore`. Each realm's portal is its own door (`tiles.json`'s
+  `portals`), and every item's name is `item_<id>` in `strings.yaml`. Talk to an npc to hear its
+  next line (in the toast, which screen readers read); a tie between two things beside you goes to
+  the one you face.
+- **Motion:** the player faces the way it walks and bobs a pixel each step; the merchant, guide, people
+  and foe breathe; maps fade in. With reduced motion on, none of it.
+- **Screenshots:** `python3 tools/quest/tests/shoot_maps.py <folder>` saves every map as a player
+  first sees it (`explore/#look=<map>`, local only), for reviewing art and map changes.
+- **Play:** arrow keys or the touch pad walk; Enter, Space or the pad's talk button talks to whoever
+  is next to you (up, down, left or right; the one the game waits on first), but only while the
+  map has focus, so links and buttons keep Enter and Space; number keys pick in a dialog; Esc
+  closes it ("not now"; the step waits). Standing by a portal names its realm and how you did
+  there. S and M switch sound.
+- **Checks:** the build checks the maps (above) and the tile index; `tests/play_map.js` walks
+  each map through the machine with no canvas. In a real browser,
+  `python3 tools/quest/tests/smoke_explore.py` builds the site, serves it, and plays each
+  explorable realm in headless Chrome (`explore/#smoke=<realm>`): locked for a fresh player, the
+  map loads, every step talked to in order, the gate shut exactly until its steps are done, the
+  realm saved, Enter on a link left alone, no request outside the site, and the fun and the people
+  (all with page-script events, not the browser's own input). pytest runs it wherever
+  Chrome is installed, CI included. The scripted play writes saves, so it runs only on a local
+  server (`127.0.0.1` or `localhost`). Touch, screen reader and cross-browser checks are a manual
+  list in the PR.
 
 ## When the build fails
 
@@ -238,6 +307,8 @@ sources:
 | `art/classic/….txt: not used` | an art file the page never reads, or a scene for a realm that doesn't exist or has halls (a realm of halls shows its crown) | remove it, or fix its name |
 | `strings.yaml: '…' is not used by the page, the engine or a plugin` | a string nothing reads (often a typo, or one a plugin reads without listing it in `STRINGS`) | remove it, or list it in the plugin's `STRINGS` |
 | `maps/….tmj: …` (for example `can't be reached when the game waits on …`, `must be exactly one tile on the grid`, `the map's edge must all be wall`, `step … needs exactly one object`, `is external; embed it`) | a map doesn't bind to the content, or something on it can't be reached | fix the map in Tiled; the message names the object |
+| `explore/: … bytes is over the 3,000,000-byte budget` | the explore folder grew too big (usually art or maps) | shrink the tiles or maps |
+| `tiles/tiles.json: an explorable pack names its tile frames here` | a pack lists `explore.realms` but has no tile index | add `tiles/tiles.json` |
 | `realm …: the classic page plays either halls or one encounter per realm` | a realm with halls and an encounter, or two encounters | split it into realms |
 | `pack.yaml: …` (for example `unknown key`, `unlock must be one of`, `pane …: label '…' is not in strings.yaml`, `pane id '…' is also a content key`) | the manifest is malformed | fix `pack.yaml`; the message names the rule |
 | `packs … and … share storage_key '…'` (or `id`, `publish_path`) | two games would overwrite each other's saves or Pages folder | give each pack its own |

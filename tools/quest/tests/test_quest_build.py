@@ -286,7 +286,7 @@ def test_page_makes_no_outside_requests(doc, capture):
 def test_highlight_rule_outranks_the_agentql_text_colour():
     # B1 from review: `.scroll .on` lost to `.scroll .agent` (same specificity, declared later),
     # painting highlighted AgentQL amber on amber. The highlight needs the extra class.
-    css = B.TEMPLATE.read_text(encoding="utf-8")
+    css = B.CORE_CSS.read_text(encoding="utf-8")   # the shared look, inlined into the classic page
     assert re.search(r"\.scroll \.ln\.on \{[^}]*color:", css)
     assert not re.search(r"\.scroll \.on \{", css)
 
@@ -1303,7 +1303,7 @@ def test_routes_name_only_realms(doc, capture):
     ("publish_path: agentql-quest", "publish_path: Agentql Quest", "publish_path must be a folder name"),
     ("  lesson_sql: agents/cli/ts-object-model-agentql-query/references/lesson-sql.md",
      "  lesson_sql: no/such/file.md", "source 'lesson_sql' is not a file in the repo"),
-    ("explore:\n  realms: []", "explore:\n  realms: mines", "explore.realms must be a list"),
+    ("explore:\n  realms: [mines]", "explore:\n  realms: mines", "explore.realms must be a list"),
     ("checks: [agentql_capture, course_refs, agentql_rules]", "checks: [agentql_capture, course_refs, agentql_rules, ../build]",
      "no plugin checks/../build.py"),
     ("unlock: first_realm_first", "unlock: none", "unlock must be one of"),
@@ -1756,7 +1756,7 @@ def test_the_page_title_and_description_are_escaped(doc, capture):
     html = B.render(B.TEMPLATE.read_text(encoding="utf-8"), data, "", ART)
     assert "<title>Quest &lt;b&gt;&quot;&amp;</title>" in html
     assert '<meta name="description" content="Say &quot;&lt;hi&gt;&quot; &amp; go">' in html
-    assert '<h1 class="sr-only">${esc(QUEST.pack.title)}</h1>' in B.TEMPLATE.read_text(encoding="utf-8")
+    assert '<h1 class="sr-only">${esc(QUEST.pack.title)}</h1>' in (B.CORE_DIR / "60-screens.js").read_text(encoding="utf-8")
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
@@ -1807,12 +1807,12 @@ def test_the_agentql_page_smoke_plays_every_realm(tmp_path):
     (lambda h: h.replace('H("realm_max", { max: maxGold(r) })', 'H("realm_max")'), "unfilled {max}"),
 ])
 def test_the_smoke_play_catches_a_broken_screen(tmp_path, break_it, needle):
-    template = B.TEMPLATE.read_text(encoding="utf-8")
-    broken = break_it(template)
-    assert broken != template or needle is None
+    core = B.core_script()          # the screens are drawn by core/60-screens.js
+    broken = break_it(core)
+    assert broken != core or needle is None
     data, _ = B.compile_pack(B.Pack("agentql"))
     page = tmp_path / "index.html"
-    page.write_text(B.render(broken, data, "", ART), encoding="utf-8")
+    page.write_text(B.render(B.TEMPLATE.read_text(encoding="utf-8"), data, "", ART, broken), encoding="utf-8")
     r = subprocess.run(["node", str(HERE / "smoke_page.js"), str(page)], capture_output=True, text=True)
     if needle is None:
         assert r.returncode == 0, r.stderr
@@ -1873,7 +1873,7 @@ def test_the_build_keeps_arts_trailing_spaces():
 
 
 @pytest.mark.parametrize("mark", [B.PLACEHOLDER, B.FONT_PLACEHOLDER, B.ART_PLACEHOLDER, B.TITLE_PLACEHOLDER,
-                                  B.DESCRIPTION_PLACEHOLDER, B.CORE_PLACEHOLDER])
+                                  B.DESCRIPTION_PLACEHOLDER, B.CORE_PLACEHOLDER, B.CSS_PLACEHOLDER])
 def test_render_needs_every_placeholder_exactly_once(mark):
     template = B.TEMPLATE.read_text(encoding="utf-8")
     for broken in (template.replace(mark, ""), template.replace(mark, mark + mark)):
@@ -1883,16 +1883,16 @@ def test_render_needs_every_placeholder_exactly_once(mark):
 
 def test_wording_in_attributes_is_escaped():
     # H() output is for element text; an attribute takes the plain string, escaped.
-    assert 'aria-label="${esc(S("legend_label"))}"' in B.TEMPLATE.read_text(encoding="utf-8")
+    assert 'aria-label="${esc(S("legend_label"))}"' in (B.CORE_DIR / "60-screens.js").read_text(encoding="utf-8")
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
 @pytest.mark.parametrize("where,old,new,needle", [
     # victory's "Back to the map" leads nowhere: the old smoke play looped and passed
-    ("page", '{ label: S("back_to_map"), action: MAP_ACTION }, { label: S("quest_again")',
+    ("core", '{ label: S("back_to_map"), action: MAP_ACTION }, { label: S("quest_again")',
      '{ label: S("back_to_map"), action: { type: "again" } }, { label: S("quest_again")', "ran out of steps"),
     # the last realm's map entry opens the first realm instead
-    ("page", 'action: { type: "realm", realm: i } };', 'action: { type: "realm", realm: i === REALMS.length - 1 ? 0 : i } };',
+    ("core", 'action: { type: "realm", realm: i } };', 'action: { type: "realm", realm: i === REALMS.length - 1 ? 0 : i } };',
      "did not open from the map"),
     # a realm that returns to the map without finishing (the round-2 hole), now in the machine
     ("core", 'if (s.step >= r.encounters[s.enc].points.length) finish("victory");',
@@ -1973,7 +1973,7 @@ def test_placeholder_names_anywhere_in_the_pack_are_never_filled(doc, capture):
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
 def test_the_soon_marker_comes_from_the_pack():
-    lines = B.TEMPLATE.read_text(encoding="utf-8").split("<script>", 1)[1].splitlines()
+    lines = (B.CORE_DIR / "60-screens.js").read_text(encoding="utf-8").splitlines()
     start = lines.index(next(x for x in lines if x.startswith("function cell(c)")))
     js = (CORE_TEXT.read_text(encoding="utf-8") + '\nconst esc = Quest.esc, { S } = Quest.wording({"soon_marker": "Soon:"});\n'
           + "\n".join(lines[start:start + 5])
@@ -2010,8 +2010,8 @@ def test_a_games_own_undefined_does_not_hide_a_broken_screen(tmp_path):
     page.write_text(B.render(B.TEMPLATE.read_text(encoding="utf-8"), data, "", ART), encoding="utf-8")
     ok = subprocess.run(["node", str(HERE / "smoke_page.js"), str(page)], capture_output=True, text=True)
     assert ok.returncode == 0, ok.stdout + ok.stderr
-    broken = B.TEMPLATE.read_text(encoding="utf-8").replace('art("foe")', "ART.nothing")
-    page.write_text(B.render(broken, data, "", ART), encoding="utf-8")
+    broken = B.core_script().replace('art("foe")', "ART.nothing")
+    page.write_text(B.render(B.TEMPLATE.read_text(encoding="utf-8"), data, "", ART, broken), encoding="utf-8")
     r = subprocess.run(["node", str(HERE / "smoke_page.js"), str(page)], capture_output=True, text=True)
     assert r.returncode != 0 and '"undefined"' in r.stderr, r.stdout + r.stderr
 
@@ -2112,7 +2112,7 @@ def test_the_machine_plays_the_whole_game_without_a_page():
 
 
 def test_the_machine_rules_and_text_never_touch_the_page_or_storage():
-    for name in ("10-text.js", "20-rules.js", "40-machine.js"):
+    for name in ("10-text.js", "20-rules.js", "40-machine.js", "60-screens.js"):
         text = (B.CORE_DIR / name).read_text(encoding="utf-8")
         for word in ("document", "localStorage", "window", "innerHTML", "AudioContext"):
             assert word not in text, (name, word)
@@ -2371,8 +2371,21 @@ import maps as MAPS  # noqa: E402
 TILE = 16
 
 
+def _png(w: int, h: int) -> bytes:
+    """A real, blank RGBA PNG of w x h pixels."""
+    import struct
+    import zlib
+    chunk = lambda kind, data: struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    raw = b"".join(b"\0" + b"\0" * (w * 4) for _ in range(h))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+_PNG16 = _png(TILE, TILE)
+
+
 def _tmj(rows: list[str], objects: dict[str, tuple[str, dict]], gates: list[tuple[str, list[tuple[int, int]]]] = (),
-         image: str = "tiles.png") -> dict:
+         image: str = "../tiles/tiles.png") -> dict:
     """A Tiled map from a picture: '#' is a wall, a letter is the object `objects` names, '.' floor.
     `gates` are (requires, [tiles]) rectangles of closed tiles."""
     h, w = len(rows), len(rows[0])
@@ -2422,7 +2435,8 @@ def _explorable(tmp_path, cave=None, over=None, write_image=True):
     (pack.dir / "maps/cave.tmj").write_text(json.dumps(cave or _tmj(CAVE_ROWS, CAVE_OBJECTS, CAVE_GATE)), encoding="utf-8")
     (pack.dir / "maps/overworld.tmj").write_text(json.dumps(over or _tmj(OVER_ROWS, OVER_OBJECTS)), encoding="utf-8")
     if write_image:
-        (pack.dir / "maps/tiles.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (pack.dir / "tiles").mkdir(exist_ok=True)
+        (pack.dir / "tiles/tiles.png").write_bytes(_PNG16)
     pack = B.Pack("second", pack.dir.parent)
     data, errors = B.compile_pack(pack)
     assert errors == [], errors
@@ -2525,7 +2539,7 @@ def test_the_overworld_needs_one_portal_per_realm(tmp_path, objects, needle):
     (lambda m: m["layers"][2]["objects"][1]["properties"][0].update(type="int", value=5), "must be a string"),
     (lambda m: [o.update({"class": o.pop("type")}) for o in m["layers"][2]["objects"][:1]], "saved by Tiled 1.9"),
 ])
-def test_every_map_is_one_phaser_can_load(tmp_path, edit, needle):
+def test_every_map_is_one_the_page_can_load(tmp_path, edit, needle):
     cave = _tmj(CAVE_ROWS, CAVE_OBJECTS, CAVE_GATE)
     edit(cave)
     pack, data = _explorable(tmp_path, cave=cave)
@@ -2534,7 +2548,7 @@ def test_every_map_is_one_phaser_can_load(tmp_path, edit, needle):
 
 def test_a_tileset_image_must_ship_with_the_pack(tmp_path):
     pack, data = _explorable(tmp_path, write_image=False)
-    assert any("image 'tiles.png' is not in the pack" in e for e in MAPS.check_maps(pack.dir, data))
+    assert any("image '../tiles/tiles.png' is not in the pack" in e for e in MAPS.check_maps(pack.dir, data))
 
 
 def test_maps_are_only_for_explorable_realms(tmp_path):
@@ -2630,6 +2644,8 @@ def _obj(m, kind):
     (lambda m: _layer(m, "objectgroup").update(name="Object Layer 1"), "one object layer, named objects"),
     (lambda m: m["layers"].append({"type": "objectgroup", "name": "objects", "objects": []}), "one object layer, named objects"),
     (lambda m: m["layers"].pop(1), "exactly the tile layers floor and walls"),
+    (lambda m: m["layers"].insert(2, dict(m["layers"][1], name="decor")), None),          # a decor layer is fine
+    (lambda m: m["layers"].insert(2, dict(m["layers"][1], name="props")), "exactly the tile layers floor and walls"),
     (lambda m: m["layers"][1].update(width=3), "tile layer 'floor' must be the map's size"),
     (lambda m: m["tilesets"][0].update(name="kenney"), "one tileset, named tiles"),
     (lambda m: m["tilesets"].append(dict(m["tilesets"][0], firstgid=2)), "one tileset, named tiles"),
@@ -2656,11 +2672,11 @@ def _obj(m, kind):
     (lambda m: m["tilesets"][0].update(image="../pack.yaml"), "is not in the pack"),
     (lambda m: m["tilesets"][0].update(image="../../../outside.png"), "is not in the pack"),
 ])
-def test_a_map_phaser_would_read_differently_fails(tmp_path, edit, needle):
+def test_a_map_the_page_would_read_differently_fails(tmp_path, edit, needle):
     cave = _tmj(CAVE_ROWS, CAVE_OBJECTS, CAVE_GATE)
     edit(cave)
     pack, data = _explorable(tmp_path, cave=cave)
-    (tmp_path / "outside.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (tmp_path / "outside.png").write_bytes(_PNG16)
     errors = MAPS.check_maps(pack.dir, data)
     assert (errors == []) if needle is None else any(needle in e for e in errors), errors
 
@@ -2928,7 +2944,7 @@ def _with_objects(m, extra):
     (lambda m: m.pop("orientation"), "orientation must be orthogonal"),
     (lambda m: m.update(infinite=[]), "is infinite"),
     (lambda m: _layer(m, "tilelayer")["data"].__setitem__(0, 2 ** 53 + 1), "must be 12x6 tile numbers"),
-    (lambda m: m["tilesets"][0].update(tiles=[{"id": 0, "properties": {"a": 1}}]), "per-tile data Phaser can't read"),
+    (lambda m: m["tilesets"][0].update(tiles=[{"id": 0, "properties": {"a": 1}}]), "per-tile data that isn't a list of properties"),
     (lambda m: _obj(m, "foe").pop("x"), "must be numbers"),
     (lambda m: _obj(m, "foe").update(x=10 ** 400), "must be numbers"),
     (lambda m: m["tilesets"][0].update(image="x" * 300 + ".png"), "is not in the pack"),
@@ -3008,3 +3024,643 @@ def test_a_spawn_on_the_edge_leaves_it_open(tmp_path):
     rows = ["############", "#..M.G..#F.#", "S.......#..#", "#.C.......##", "#X......#R.#", "############"]
     pack, data = _explorable(tmp_path, cave=_tmj(rows, CAVE_OBJECTS, CAVE_GATE))
     assert any("the map's edge must all be wall" in e for e in MAPS.check_maps(pack.dir, data))
+
+
+# ---- PR 5: the explore front end (design §4) ------------------------------------------------------
+
+EXPLORE_FILES = ["index.html", "explore.js", "engine.js", "core.js", "quest.css", "fonts.css", "art.json",
+                 "tiles.json", "tiles/tiles.png", "tiles/LICENSE-kenney.txt", "maps/overworld.tmj", "maps/mines.tmj",
+                 B.EXPLORE_MARK, "fonts/LICENSE-vt323.txt", "fonts/LICENSE-ibm-plex-mono.txt"]
+
+
+def test_the_explore_folder_is_built_local_and_in_budget(tmp_path):
+    page = tmp_path / "index.html"
+    assert B.main(["--out", str(page)]) == 0
+    ex = tmp_path / "explore"
+    for f in EXPLORE_FILES:
+        assert (ex / f).is_file(), f
+    assert sum(f.stat().st_size for f in ex.rglob("*") if f.is_file()) <= B.EXPLORE_BUDGET
+    html = (ex / "index.html").read_text(encoding="utf-8")
+    assert "<title>AgentQL Quest</title>" in html and "__PAGE_" not in html
+    assert (ex / "core.js").read_text(encoding="utf-8") == B.core_script()
+    # Nothing is fetched from outside: no remote src/href/url() in our files, and every local
+    # fetch in explore.js names a file the build wrote.
+    for f in ("index.html", "explore.js", "quest.css", "fonts.css", "core.js"):
+        text = (ex / f).read_text(encoding="utf-8")
+        assert not re.search(r'(?:src|href)\s*=\s*["\']?(?:https?:)?//|url\(\s*["\']?(?:https?:)?//|fetch\(\s*["`\']https?:', text), f
+    js = (ex / "explore.js").read_text(encoding="utf-8")
+    fetched = re.findall(r'fetch\("([^"]+)"\)', js)
+    assert fetched
+    for local in fetched:
+        assert (ex / local).resolve().is_file(), local
+    assert json.loads((ex / "art.json").read_text(encoding="utf-8")) == ART
+
+
+def test_an_explore_folder_over_budget_fails_the_build(tmp_path, monkeypatch):
+    monkeypatch.setattr(B, "EXPLORE_BUDGET", 1000)
+    assert B.main(["--out", str(tmp_path / "index.html")]) == 1
+
+
+def test_the_packs_own_maps_pass_the_checks():
+    data, errors = B.compile_pack(B.Pack("agentql"))
+    assert errors == [] and data["pack"]["explore_realms"] == ["mines"]
+    assert MAPS.check_maps(PACK_DIR, data) == []
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_the_mines_map_plays_through_the_machine(tmp_path):
+    data, _ = B.compile_pack(B.Pack("agentql"))
+    quest = tmp_path / "quest.json"
+    quest.write_text(json.dumps(data), encoding="utf-8")
+    r = subprocess.run(["node", str(HERE / "play_map.js"), str(quest), str(PACK_DIR / "maps/mines.tmj"), "mines"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    out = json.loads(r.stdout)
+    assert out["interactions"] == [f"west_sales:{x}" for x in MAPS.ROLES] and out["saves"] == ["mines"]
+
+
+DEEP_LINK = r"""
+const fs = require("fs"), vm = require("vm");
+const html = fs.readFileSync(process.argv[1], "utf8");
+const block = id => html.split(`<script id="${id}" type="application/json">`)[1].split("</script>")[0];
+const js = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].pop()[1];
+const el = () => ({ textContent: "", setAttribute() {} });
+const link = { textContent: "" }, back = { hidden: true, querySelector: () => link };
+const screen = { innerHTML: "", querySelector: () => null };
+const els = { "quest-data": { textContent: block("quest-data") }, "classic-art": { textContent: block("classic-art") },
+              live: el(), "sound-sfx": el(), "sound-music": el(), "back-explore": back };
+const store = {};
+const ctx = vm.createContext({
+  document: { getElementById: id => els[id] || screen, addEventListener() {}, hidden: false },
+  localStorage: { getItem: k => store[k] ?? null, setItem: (k, v) => { store[k] = v; } },
+  setInterval: () => 0, clearInterval: () => {}, JSON, String, Number, parseInt, Object, Array, Math,
+  ...(process.argv[2] === "none" ? {} : { location: { hash: process.argv[2] } })
+});
+vm.runInContext(js, ctx);
+const st = vm.runInContext("Quest.classic.state()", ctx);
+console.log(JSON.stringify({ screen: st.screen, realm: st.realm, back: !back.hidden, label: link.textContent }));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+@pytest.mark.parametrize("hash,want", [
+    ("#realm=mines&from=explore", {"screen": "realm", "realm": 1, "back": True}),
+    ("#realm=mines", {"screen": "realm", "realm": 1, "back": False}),
+    ("#realm=nowhere&from=explore", {"screen": "title", "back": False}),
+    ("#realm=mines&from=explore&x=1", {"screen": "title", "back": False}),
+    ("", {"screen": "title", "back": False}),
+    ("none", {"screen": "title", "back": False}),         # no location at all (as in node)
+])
+def test_the_classic_page_opens_at_a_realm_from_the_explore_map(tmp_path, hash, want):
+    page = tmp_path / "index.html"
+    assert B.main(["--out", str(page)]) == 0
+    r = subprocess.run(["node", "-e", DEEP_LINK, str(page), hash], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    got = json.loads(r.stdout)
+    assert {k: got[k] for k in want} == want
+    data = json.loads((tmp_path / "quest.json").read_text(encoding="utf-8"))
+    assert got["label"] == (data["pack"]["strings"]["explore_back"] if want["back"] else "")
+
+
+GOOD_SMOKE = ["MAP overworld", "LOCKED mines", "MAP mines", "MAP overworld",
+              "SMOKE mines west_sales:merchant[gate-shut] west_sales:guide[gate-shut] west_sales:compiler[gate-shut] "
+              "west_sales:foe west_sales:reward | {\"done\":true,\"best\":0}", "EXIT mines"]
+
+
+@pytest.mark.parametrize("edit,needle", [
+    (None, None),
+    (lambda log: [x for x in log if not x.startswith("LOCKED")], "was not locked for a fresh player"),
+    (lambda log: [x for x in log if x != "MAP mines"], "map never loaded"),
+    (lambda log: log + ["ERROR smoke: timed out"], "ERROR smoke"),
+    (lambda log: log[:-2] + log[-1:], "no SMOKE line"),
+    (lambda log: log[:-1], "the exit of mines didn't take the player back"),
+    (lambda log: log[:-2] + [log[-2].replace("west_sales:foe ", ""), log[-1]], "steps"),
+    (lambda log: log[:-2] + [log[-2].replace("west_sales:foe", "west_sales:foe[gate-shut]"), log[-1]], "at west_sales:foe the gate is shut"),
+    (lambda log: log[:-2] + [log[-2].replace("compiler[gate-shut]", "compiler"), log[-1]], "at west_sales:compiler the gate is open"),
+    (lambda log: log[:-2] + [log[-2].replace('{"done":true,"best":0}', "null"), log[-1]], "was not saved as finished"),
+])
+def test_the_explore_smoke_reads_the_page_log(edit, needle):
+    sys.path.insert(0, str(HERE))
+    import smoke_explore as SX
+    data, _ = B.compile_pack(B.Pack("agentql"))
+    problems = SX.check("mines", edit(list(GOOD_SMOKE)) if edit else list(GOOD_SMOKE), data)
+    assert (problems == []) if needle is None else any(needle in p for p in problems), problems
+
+
+def test_the_explore_page_plays_in_a_real_browser():
+    # tests/smoke_explore.py: headless Chrome plays each explorable realm of the built site.
+    sys.path.insert(0, str(HERE))
+    import smoke_explore as SX
+    if SX.find_chrome() is None:
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            pytest.fail("CI must have Chrome (ubuntu-latest ships it) to play the explore page")
+        pytest.skip("no Chrome here")
+    assert SX.main([]) == 0
+
+
+def test_only_an_explorable_pack_needs_the_explore_pages_strings():
+    template = B.TEMPLATE.read_text(encoding="utf-8")
+    assert "explore_help" not in B.classic_needs(template)[0]
+    assert "explore_help" in B.classic_needs(template, explore_page=True)[0]
+
+
+def test_a_rebuild_leaves_no_old_explore_files(tmp_path):
+    page = tmp_path / "index.html"
+    assert B.main(["--out", str(page)]) == 0
+    (tmp_path / "explore/maps/old.tmj").write_text("{}", encoding="utf-8")
+    assert B.main(["--out", str(page)]) == 0
+    assert not (tmp_path / "explore/maps/old.tmj").exists()
+    assert (tmp_path / "explore/engine.js").read_bytes() == (B.EXPLORE_DIR / "engine.js").read_bytes()
+
+
+
+# ---- re-review of PR 5 --------------------------------------------------------------------------
+
+def test_a_rebuild_never_deletes_a_folder_it_did_not_write(tmp_path):
+    (tmp_path / "explore").mkdir()
+    (tmp_path / "explore/notes.txt").write_text("mine", encoding="utf-8")
+    assert B.main(["--out", str(tmp_path / "index.html")]) == 1
+    assert (tmp_path / "explore/notes.txt").read_text(encoding="utf-8") == "mine"
+
+
+@pytest.mark.parametrize("where", ["index.html", "explore/index.html", "core/index.html", "packs/agentql/index.html"])
+def test_the_build_refuses_to_write_into_its_own_sources(monkeypatch, tmp_path, where):
+    # In a copy of tools/quest, so a failure can't touch the real sources.
+    copy = tmp_path / "quest"
+    shutil.copytree(B.HERE, copy, ignore=shutil.ignore_patterns("dist", "__pycache__", "tests"))
+    monkeypatch.setattr(B, "HERE", copy)
+    before = {p: p.read_bytes() for p in copy.rglob("*") if p.is_file()}
+    assert B.main(["--out", str(copy / where)]) == 1
+    after = {p: p.read_bytes() for p in copy.rglob("*") if p.is_file()}
+    assert after == before          # refused before anything was written
+
+
+def test_the_default_build_into_dist_works(monkeypatch, tmp_path):
+    copy = tmp_path / "quest"
+    shutil.copytree(B.HERE, copy, ignore=shutil.ignore_patterns("dist", "__pycache__", "tests"))
+    monkeypatch.setattr(B, "HERE", copy)
+    assert B.main(["--out", str(copy / "dist/index.html")]) == 0
+    assert (copy / "dist/explore/engine.js").is_file()
+    assert B.main(["--out", str(copy / "dist/index.html")]) == 0      # and again, over its own folder
+
+
+def test_an_explore_link_is_refused(tmp_path):
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "explore").symlink_to(tmp_path / "elsewhere")
+    assert B.main(["--out", str(tmp_path / "index.html")]) == 1
+    assert not (tmp_path / "index.html").exists()
+
+
+def test_a_published_name_in_the_explore_page_fails_the_build(tmp_path, monkeypatch):
+    explore = tmp_path / "explore"
+    shutil.copytree(B.EXPLORE_DIR, explore)
+    (explore / "explore.js").write_text((explore / "explore.js").read_text(encoding="utf-8") + "\n// the zqxvorn\n", encoding="utf-8")
+    monkeypatch.setattr(B, "EXPLORE_DIR", explore)
+    _invented(monkeypatch)
+    assert any("explore.js: 'zqxvorn' is a name from a published work" in e for e in B.build(check=True)[3])
+
+
+def test_the_explore_smoke_fails_when_the_page_does(monkeypatch):
+    sys.path.insert(0, str(HERE))
+    import smoke_explore as SX
+    if SX.find_chrome() is None:
+        pytest.skip("no Chrome here")
+    monkeypatch.setattr(SX, "run", lambda *a, **k: ["MAP overworld", "ERROR smoke: timed out"])
+    assert SX.main([]) == 1
+
+
+def test_the_explore_page_keeps_its_test_hooks_local_and_its_log_unread():
+    js = (B.EXPLORE_DIR / "explore.js").read_text(encoding="utf-8")
+    assert 'const LOCAL = ["127.0.0.1", "localhost"].includes(location.hostname);' in js
+    assert re.search(r"const SMOKE = [^;]*&& LOCAL;", js) and "if (SMOKE) Quest.explore.smoke" in js
+    assert '<pre id="log" hidden></pre>' in (B.EXPLORE_DIR / "index.html").read_text(encoding="utf-8")
+
+
+HELD_KEYS = r"""
+const fs = require("fs"), vm = require("vm");
+const html = fs.readFileSync(process.argv[1], "utf8");
+const block = id => html.split(`<script id="${id}" type="application/json">`)[1].split("</script>")[0];
+const js = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].pop()[1];
+const listeners = {}, store = {};
+const el = () => ({ textContent: "", setAttribute() {} }), screen = { innerHTML: "", querySelector: () => null };
+const els = { "quest-data": { textContent: block("quest-data") }, "classic-art": { textContent: block("classic-art") },
+              live: el(), "sound-sfx": el(), "sound-music": el() };
+const ctx = vm.createContext({
+  document: { getElementById: id => els[id] || screen, hidden: false, addEventListener: (t, fn) => { (listeners[t] = listeners[t] || []).push(fn); } },
+  localStorage: { getItem: k => store[k] ?? null, setItem: (k, v) => { store[k] = String(v); } },
+  setInterval: () => 1, clearInterval: () => {}, JSON, String, Number, parseInt, Object, Array, Math });
+vm.runInContext(js, ctx);
+const press = (key, repeat) => { let p = false; listeners.keydown.forEach(fn => fn({ key, repeat, preventDefault() { p = true; } })); return p; };
+const screenNow = () => vm.runInContext("Quest.classic.state().screen", ctx);
+console.log(JSON.stringify({ enter: press("Enter", true), space: press(" ", true), digit: [press("1", true), screenNow()],
+                             first: [press("1", false), screenNow()] }));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_the_classic_page_holds_back_held_enter_only(tmp_path):
+    # Held Enter mustn't keep "clicking" the focused button; held Space still scrolls the page.
+    page = tmp_path / "index.html"
+    assert B.main(["--out", str(page)]) == 0
+    r = subprocess.run(["node", "-e", HELD_KEYS, str(page)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == {"enter": True, "space": False, "digit": [False, "title"], "first": [True, "map"]}
+
+
+# ---- PR 6: the art pass (Tiny Dungeon) ------------------------------------------------------------
+
+def test_the_packs_tiles_name_every_frame_the_explore_page_draws():
+    assert B.check_tiles(B.Pack("agentql")) == []
+    frames = json.loads((PACK_DIR / "tiles/tiles.json").read_text(encoding="utf-8"))
+    js = (B.EXPLORE_DIR / "explore.js").read_text(encoding="utf-8")
+    for name in set(re.findall(r"FRAMES\.([a-z_]+)", js)) | {"merchant", "guide", "compiler", "foe", "reward", "exit", "portal"}:
+        assert name in frames, name
+
+
+@pytest.mark.parametrize("edit,needle", [
+    (lambda f: f.pop("gate"), "needs 'gate'"),
+    (lambda f: f.update(gate=144), "'gate' must be a frame of tiles.png, 0 to 143"),
+    (lambda f: f.update(gate="28"), "'gate' must be a frame"),
+    (lambda f: f.update(gate=True), "'gate' must be a frame"),
+    (lambda f: f.update(gate=-1), "'gate' must be a frame"),
+    (lambda f: f.update(sparkle=3), "'sparkle' is not used"),
+])
+def test_a_broken_tile_index_fails_the_build(tmp_path, monkeypatch, edit, needle):
+    packs = _copy_packs(tmp_path)
+    f = packs / "agentql/tiles/tiles.json"
+    frames = json.loads(f.read_text(encoding="utf-8"))
+    edit(frames)
+    f.write_text(json.dumps(frames), encoding="utf-8")
+    monkeypatch.setattr(B, "PACKS", packs)
+    assert any(needle in e for e in B.build(check=True)[3])
+
+
+@pytest.mark.parametrize("edit,needle", [
+    (lambda m: m["tilesets"][0].update(imagewidth=176), "says its image is 176x192, but ../tiles/tiles.png is 192x192"),
+    (lambda m: m["tilesets"][0].update(tilecount=200), "must have tilecount 144 and columns 12"),
+    (lambda m: m["tilesets"][0].update(columns=11), "must have tilecount 144 and columns 12"),
+    (lambda m: m["tilesets"][0].update(firstgid=2), "needs firstgid 1"),
+    (lambda m: m["tilesets"][0].update(image="../maps/mines.tmj"), "is not in the pack"),
+    (lambda m: next(l for l in m["layers"] if l["name"] == "decor")["data"].__setitem__(0, 145), "uses a tile past t"),
+])
+def test_a_map_must_match_its_tileset(tmp_path, monkeypatch, edit, needle):
+    packs = _copy_packs(tmp_path)
+    f = packs / "agentql/maps/mines.tmj"
+    m = json.loads(f.read_text(encoding="utf-8"))
+    edit(m)
+    f.write_text(json.dumps(m), encoding="utf-8")
+    data, _ = B.compile_pack(B.Pack("agentql", packs))
+    assert any(needle in e for e in MAPS.check_maps(packs / "agentql", data))
+
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_the_explore_script_parses():
+    # A syntax error stops the page before its own error log exists, so the smoke only sees silence.
+    r = subprocess.run(["node", "--check", str(B.EXPLORE_DIR / "explore.js")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+
+
+def test_a_map_draws_with_the_atlas_the_page_draws(tmp_path, monkeypatch):
+    # Another PNG in the pack, even a bigger one, isn't what the page draws: refused.
+    packs = _copy_packs(tmp_path)
+    shutil.copy(packs / "agentql/tiles/tiles.png", packs / "agentql/maps/big.png")
+    f = packs / "agentql/maps/mines.tmj"
+    m = json.loads(f.read_text(encoding="utf-8"))
+    m["tilesets"][0]["image"] = "big.png"
+    f.write_text(json.dumps(m), encoding="utf-8")
+    data, _ = B.compile_pack(B.Pack("agentql", packs))
+    assert any("must be ../tiles/tiles.png" in e for e in MAPS.check_maps(packs / "agentql", data))
+
+
+# ---- PR 7: chests, barrels, hoards, weapons, a door per realm -------------------------------------
+
+FUN_ITEMS = {"sword": {"frame": 1, "kind": "weapon"}, "gem": {"frame": 2, "kind": "treasure"}}
+FUN_NPCS = {"elder": 3}
+
+
+def _fun_cave(tmp_path, extra, rows=CAVE_ROWS, walls=None):
+    objects = dict(CAVE_OBJECTS, **{k: v for k, v in extra.items()})
+    cave = _tmj(rows, objects, CAVE_GATE)
+    pack, data = _explorable(tmp_path, cave=cave)
+    (pack.dir / "tiles").mkdir(exist_ok=True)
+    (pack.dir / "tiles/tiles.json").write_text(json.dumps({"items": FUN_ITEMS, "npcs": FUN_NPCS}), encoding="utf-8")
+    return MAPS.check_maps(pack.dir, data)
+
+
+def _rows(*edits):
+    rows = [list(r) for r in CAVE_ROWS]
+    for x, y, ch in edits:
+        rows[y][x] = ch
+    return ["".join(r) for r in rows]
+
+
+def test_chests_barrels_and_hoards_that_fit_pass(tmp_path):
+    rows = _rows((3, 4, "c"), (6, 2, "k"), (6, 4, "b"))      # a chest, a mimic, a barrel
+    errors = _fun_cave(tmp_path, {"c": ("chest", {"loot": "gem"}), "k": ("chest", {"loot": "mimic"}),
+                                  "b": ("barrel", {"roll": "right"})}, rows)
+    assert errors == [], errors
+
+
+@pytest.mark.parametrize("edits,extra,needle", [
+    ([(2, 2, "c")], {"c": ("chest", {"loot": "crown"})}, "loot='crown' is not an item"),
+    ([(6, 3, "b")], {"b": ("barrel", {"roll": "sideways"})}, "roll must be one of"),
+    ([(1, 2, "b")], {"b": ("barrel", {"roll": "left"})}, "which isn't open floor"),                # into the wall
+    ([(4, 1, "b")], {"b": ("barrel", {"roll": "left"})}, "which isn't open floor"),                # onto the merchant
+    ([(7, 3, "b")], {"b": ("barrel", {"roll": "right"})}, "which isn't open floor"),               # onto the gate
+    # a barrel just past the gate: where it stands blocks the way to the foe, so the quest would care
+    ([(9, 3, "b")], {"b": ("barrel", {"roll": "down"})}, "can't be reached when the game waits on the_rune:foe"),
+    # a chest walled into a corner nobody can reach, even at the end
+    ([(10, 1, "c"), (9, 1, "#"), (10, 2, "#")], {"c": ("chest", {"loot": "gem"})}, "can't be reached, even once the quest is done"),
+])
+def test_the_fun_on_a_map_never_blocks_the_quest(tmp_path, edits, extra, needle):
+    errors = _fun_cave(tmp_path, extra, _rows(*edits))
+    assert any(needle in e for e in errors), errors
+
+
+def test_a_hoard_lies_under_one_barrel_and_names_items(tmp_path):
+    cave = _tmj(CAVE_ROWS, CAVE_OBJECTS, CAVE_GATE)
+    objs = _layer(cave, "objectgroup")["objects"]
+    objs.append({"id": 90, "type": "hoard", "x": 6 * TILE, "y": 2 * TILE, "width": TILE, "height": TILE,
+                 "properties": [{"name": "loot", "type": "string", "value": "gem,crown"}]})
+    pack, data = _explorable(tmp_path, cave=cave)
+    (pack.dir / "tiles").mkdir(exist_ok=True)
+    (pack.dir / "tiles/tiles.json").write_text(json.dumps({"items": FUN_ITEMS}), encoding="utf-8")
+    errors = MAPS.check_maps(pack.dir, data)
+    assert any("must name items in tiles/tiles.json" in e for e in errors), errors
+    assert any("a hoard lies under exactly one barrel" in e for e in errors), errors
+
+
+@pytest.mark.parametrize("edit,needle", [
+    (lambda f: f["portals"].update(moon=9), "portals names 'moon', which is not a realm"),
+    (lambda f: f["portals"].update(law=999), "portals maps a realm id to its door's frame"),
+    (lambda f: f["items"].update(gem={"frame": 3}), "items maps an id to {frame, kind"),
+    (lambda f: f["items"].update(gem={"frame": 3, "kind": "snack"}), "items maps an id to {frame, kind"),
+    (lambda f: f.update(weapon="red_potion"), "weapon names the weapon item you start with"),
+    (lambda f: f["items"].update(mimic={"frame": 3, "kind": "treasure"}), "'mimic' is a chest, not an item"),
+    (lambda f: f.pop("barrel"), "needs 'barrel'"),
+])
+def test_a_broken_loot_or_door_table_fails_the_build(tmp_path, monkeypatch, edit, needle):
+    packs = _copy_packs(tmp_path)
+    f = packs / "agentql/tiles/tiles.json"
+    frames = json.loads(f.read_text(encoding="utf-8"))
+    edit(frames)
+    f.write_text(json.dumps(frames), encoding="utf-8")
+    monkeypatch.setattr(B, "PACKS", packs)
+    assert any(needle in e for e in B.build(check=True)[3])
+
+
+def test_every_item_has_a_name(tmp_path, monkeypatch):
+    packs = _copy_packs(tmp_path)
+    f = packs / "agentql/strings.yaml"
+    f.write_text(f.read_text(encoding="utf-8").replace("item_axe: axe\n", ""), encoding="utf-8")
+    monkeypatch.setattr(B, "PACKS", packs)
+    assert any("the classic page needs 'item_axe'" in e for e in B.build(check=True)[3])
+
+
+def test_the_packs_maps_have_fun_in_them():
+    mines = json.loads((PACK_DIR / "maps/mines.tmj").read_text(encoding="utf-8"))
+    kinds = [o["type"] for l in mines["layers"] if l["type"] == "objectgroup" for o in l["objects"]]
+    assert kinds.count("chest") >= 2 and kinds.count("barrel") == kinds.count("hoard") == 1
+    frames = json.loads((PACK_DIR / "tiles/tiles.json").read_text(encoding="utf-8"))
+    data, _ = B.compile_pack(B.Pack("agentql"))
+    assert set(frames["portals"]) == {r["id"] for r in data["realms"]} and len(set(frames["portals"].values())) == len(data["realms"])
+
+
+
+@pytest.mark.parametrize("props,needle", [
+    ({"look": "elder", "says": "claim_true"}, None),                     # a line the pack has
+    ({"look": "elder", "about": "shore"}, None),                         # a realm, told from its content
+    ({"look": "elder", "says": "no_such_line"}, "must name lines in strings.yaml"),
+    ({"look": "elder", "about": "moon"}, "about='moon' is not a realm"),
+    ({"look": "goblin", "says": "claim_true"}, "is not one of tiles/tiles.json's npcs"),
+    ({"look": "elder"}, "needs look, and either says or about"),
+    ({"look": "elder", "says": "claim_true", "about": "shore"}, "needs look, and either says or about"),
+])
+def test_an_npc_says_lines_the_pack_has(tmp_path, props, needle):
+    errors = _fun_cave(tmp_path, {"n": ("npc", props)}, _rows((3, 4, "n")))
+    assert (errors == []) if needle is None else any(needle in e for e in errors), errors
+
+
+def test_an_npc_never_blocks_the_quest_and_can_be_reached(tmp_path):
+    # parked in the one way to the gate: the quest can't be finished
+    errors = _fun_cave(tmp_path, {"n": ("npc", {"look": "elder", "says": "claim_true"})}, _rows((7, 3, "n"), (7, 2, "#"), (7, 4, "#")))
+    assert any("can't be reached when the game waits on the_rune:foe" in e for e in errors), errors
+    # walled in where nobody can talk to it
+    errors = _fun_cave(tmp_path / "b", {"n": ("npc", {"look": "elder", "says": "claim_true"})}, _rows((10, 1, "n"), (9, 1, "#"), (10, 2, "#")))
+    assert any("can't be reached, even once the quest is done" in e for e in errors), errors
+
+
+def test_the_lines_npcs_say_count_as_used_and_needed(tmp_path, monkeypatch):
+    assert {"npc_elder_walk", "npc_miner_barrel"} <= MAPS.npc_lines(PACK_DIR)
+    packs = _copy_packs(tmp_path)
+    f = packs / "agentql/strings.yaml"
+    f.write_text(f.read_text(encoding="utf-8").replace("npc_miner_barrel:", "npc_miner_barrels:"), encoding="utf-8")
+    monkeypatch.setattr(B, "PACKS", packs)
+    errors = B.build(check=True)[3]
+    assert any("the classic page needs 'npc_miner_barrel'" in e for e in errors), errors
+
+
+
+def test_a_hoard_is_the_one_thing_that_shares_a_tile(tmp_path):
+    cave = _with_objects(_tmj(CAVE_ROWS, CAVE_OBJECTS, CAVE_GATE),
+                         [("barrel", 6, 4, {"roll": "right"}), ("hoard", 6, 4, {"loot": "gem"}), ("chest", 6, 4, {"loot": "gem"})])
+    pack, data = _explorable(tmp_path, cave=cave)
+    (pack.dir / "tiles").mkdir(exist_ok=True)
+    (pack.dir / "tiles/tiles.json").write_text(json.dumps({"items": FUN_ITEMS, "npcs": FUN_NPCS}), encoding="utf-8")
+    errors = MAPS.check_maps(pack.dir, data)
+    shared = [e for e in errors if "shares its tile" in e]
+    assert len(shared) == 1 and "(chest)" in shared[0], errors
+
+
+
+# ---- the engine (engine.js): no third-party code ----------------------------------------------------
+
+def test_the_explore_page_ships_only_our_own_code():
+    assert not (B.HERE / "vendor").exists()
+    cfg = yaml.safe_load((B.ROOT / ".github/dependabot.yml").read_text(encoding="utf-8"))
+    assert not any("tools/quest" in u.get("directory", "") for u in cfg["updates"])
+    page = (B.EXPLORE_DIR / "index.html").read_text(encoding="utf-8")
+    assert re.findall(r'<script src="([^"]+)"', page) == ["engine.js", "core.js", "explore.js"]
+    assert "Phaser" not in (B.EXPLORE_DIR / "explore.js").read_text(encoding="utf-8")
+
+
+ENGINE = r"""
+const fs = require("fs"); globalThis.Quest = {};
+eval(fs.readFileSync(process.argv[1], "utf8"));
+const E = Quest.engine, T = 16;
+// A 6x4 room: walls round the edge, one pillar at (3,1).
+const rows = ["######", "#..#.#", "#....#", "######"];
+const walls = new E.Layer({ name: "walls", width: 6, height: 4, data: rows.join("").split("").map(c => c === "#" ? 1 : 0) });
+walls.setCollisionByExclusion();
+const crate = new E.Sprite(4 * T + 8, 2 * T + 8, 0, true);
+const block = E.blocker(walls, () => [crate].filter(s => s.body.enable));
+const box = (x, y) => ({ x, y, w: 12, h: 12 });
+const out = {};
+out.right = E.move(box(1 * T + 8, 2 * T + 8), 200, 0, block);                // stops at the crate
+crate.body.enable = false;
+out.rightNoCrate = E.move(box(1 * T + 8, 2 * T + 8), 200, 0, block);         // stops at the wall
+out.up = E.move(box(1 * T + 8, 2 * T + 8), 0, -200, block);                  // stops under the top wall
+out.slide = E.move(box(1 * T + 8, 2 * T + 8), 8, -40, block);                // slides along the top while pushing up
+out.pillar = E.move(box(2 * T + 8, 1 * T + 8), 40, 0, block);               // the pillar at (3,1)
+out.fast = E.move(box(1 * T + 8, 2 * T + 8), 5000, 0, block);               // no tunnelling at any speed
+out.touching = block(4 * T, 1 * T, 4 * T + 12, 1 * T + 12) === null;        // edges touching the pillar don't count
+// 4px into a solid (it moved onto the player): pushing on goes nowhere, backing away works
+const gate = new E.Sprite(3 * T + 8, 2 * T + 8, 0, true);
+const through = E.blocker(walls, () => [gate]);
+out.deeper = E.move({ x: 3 * T - 6 + 4, y: 2 * T + 8, w: 12, h: 12 }, 40, 0, through).x;
+out.back = E.move({ x: 3 * T - 6 + 4, y: 2 * T + 8, w: 12, h: 12 }, -10, 0, through).x;
+out.tile = [walls.getTileAt(0, 0) && walls.getTileAt(0, 0).index, walls.getTileAt(1, 1), walls.getTileAtWorldXY(3 * T + 1, T + 1).x];
+console.log(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_the_engine_stops_the_player_at_walls_and_solids():
+    r = subprocess.run(["node", "-e", ENGINE, str(B.EXPLORE_DIR / "engine.js")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    got = json.loads(r.stdout)
+    assert got["right"]["x"] == 4 * 16 - 6                 # flush with the crate's left edge
+    assert got["rightNoCrate"]["x"] == 5 * 16 - 6          # flush with the right wall
+    assert got["up"]["y"] == 1 * 16 + 6                     # flush under the top wall
+    assert got["slide"]["y"] == 1 * 16 + 6 and got["slide"]["x"] == pytest.approx(1 * 16 + 16)   # pushed up, still slid right
+    assert got["pillar"]["x"] == 3 * 16 - 6
+    assert got["fast"]["x"] == 4 * 16 - 6 or got["fast"]["x"] == 5 * 16 - 6
+    assert got["touching"] is True
+    assert got["tile"] == [1, None, 3]
+    assert got["deeper"] == 3 * 16 - 6 + 4 and got["back"] == 3 * 16 - 6 + 4 - 10
+
+
+
+# ---- review of the explore stack (#650) -----------------------------------------------------------
+
+def test_the_write_guard_goes_by_the_folder_not_its_spelling(monkeypatch, tmp_path):
+    copy = tmp_path / "quest"
+    shutil.copytree(B.HERE, copy, ignore=shutil.ignore_patterns("dist", "__pycache__", "tests"))
+    monkeypatch.setattr(B, "HERE", copy)
+    other = tmp_path / "QUEST"
+    if not other.exists():
+        pytest.skip("this disk is case-sensitive")
+    before = (copy / "explore/index.html").read_bytes()
+    assert B.main(["--out", str(other / "explore/index.html")]) == 1
+    assert (copy / "explore/index.html").read_bytes() == before
+
+
+def test_a_barrel_cant_roll_onto_another_and_tiles_arent_flipped(tmp_path):
+    cave = _with_objects(_tmj(CAVE_ROWS, CAVE_OBJECTS, CAVE_GATE),
+                         [("barrel", 6, 4, {"roll": "right"}), ("barrel", 7, 4, {"roll": "up"})])
+    _layer(cave, "tilelayer")["data"][0] = 1 | 0x80000000
+    pack, data = _explorable(tmp_path, cave=cave)
+    (pack.dir / "tiles").mkdir(exist_ok=True)
+    (pack.dir / "tiles/tiles.json").write_text(json.dumps({"items": FUN_ITEMS, "npcs": FUN_NPCS}), encoding="utf-8")
+    errors = MAPS.check_maps(pack.dir, data)
+    assert any("rolls right onto (7, 4), which isn't open floor" in e for e in errors), errors
+    assert any("flipped or rotated tiles" in e for e in errors), errors
+
+
+def test_the_explore_pages_saves_and_hooks_keep_to_themselves():
+    js = (B.EXPLORE_DIR / "explore.js").read_text(encoding="utf-8")
+    assert "FUN_KEY = `${pack.storage_key}-explore`" in js           # loot apart from progress
+    assert "`${storageKey}-progress`" in (B.CORE_DIR / "30-progress.js").read_text(encoding="utf-8")
+    assert "if (LOCAL) window.Quest.explore = {" in js                # test hooks only on a local server
+
+
+def test_every_item_is_found_somewhere():
+    frames = json.loads((PACK_DIR / "tiles/tiles.json").read_text(encoding="utf-8"))
+    found = {frames["weapon"]}
+    for path in (PACK_DIR / "maps").glob("*.tmj"):
+        for layer in json.loads(path.read_text(encoding="utf-8"))["layers"]:
+            for o in layer.get("objects", []):
+                for p in o.get("properties", []):
+                    if p["name"] == "loot":
+                        found |= {x.strip() for x in p["value"].split(",")}
+    assert set(frames["items"]) <= found, set(frames["items"]) - found
+
+
+ENGINE_SHOVE = r"""
+const fs = require("fs"); globalThis.Quest = {};
+eval(fs.readFileSync(process.argv[1], "utf8"));
+const E = Quest.engine, T = 16, map = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const wallsSpec = map.layers.find(l => l.name === "walls");
+const walls = new E.Layer(wallsSpec); walls.setCollisionByExclusion();
+const objs = map.layers.find(l => l.type === "objectgroup").objects.filter(o => o.type !== "spawn")
+  .map(o => new E.Sprite(o.x + 8, o.y + 8, 0, true));
+const block = E.blocker(walls, () => objs.filter(s => s.body.enable));
+const inWall = (b) => { for (let y = Math.floor((b.y - 6) / T); y <= Math.floor((b.y + 5.999) / T); y++)
+  for (let x = Math.floor((b.x - 6) / T); x <= Math.floor((b.x + 5.999) / T); x++) { const t = walls.getTileAt(x, y); if (t && t.collides) return true; } return false; };
+// 1. a solid moved onto the player doesn't shove it: walking away, it never enters a wall or leaves the map
+const spawn = map.layers.find(l => l.type === "objectgroup").objects.find(o => o.type === "spawn");
+let box;
+const crate = new E.Sprite(spawn.x + 8, spawn.y + 8, 0, true); objs.push(crate);   // dropped right on top of the player
+const out = { shoved: 0, offmap: 0, inwall: 0, escaped: false };
+for (const [dx, dy] of [[1, 0], [0, 1], [-1, 0], [0, -1]]) {
+  box = { x: spawn.x + 8, y: spawn.y + 8, w: 12, h: 12 };
+  for (let i = 0; i < 12; i++) {
+    const to = E.move(box, dx * 1.5, dy * 1.5, block);
+    if (Math.abs(to.x - box.x) > 2 || Math.abs(to.y - box.y) > 2) out.shoved++;
+    Object.assign(box, to);
+    if (inWall(box)) out.inwall++;
+  }
+  if (Math.abs(box.x - crate.x) >= 14 || Math.abs(box.y - crate.y) >= 14) out.escaped = true;
+}
+// 2. a random walk on the real map, with things moving onto the player now and then
+let seed = 7; const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+box = { x: spawn.x + 8, y: spawn.y + 8, w: 12, h: 12 };
+for (let i = 0; i < 20000; i++) {
+  if (i % 997 === 0) { crate.x = box.x + (rnd() - 0.5) * 8; crate.y = box.y + (rnd() - 0.5) * 8; }
+  const dir = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1]][Math.floor(rnd() * 6)];
+  Object.assign(box, E.move(box, dir[0] * 1.5, dir[1] * 1.5, block));
+  if (inWall(box)) out.inwall++;
+  if (box.x < 0 || box.y < 0 || box.x > map.width * T || box.y > map.height * T) out.offmap++;
+}
+console.log(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+@pytest.mark.parametrize("name", ["mines", "overworld"])
+def test_the_engine_never_shoves_the_player_through_walls(name):
+    # The review's blocker: a solid that moved onto the player (a barrel rolled there, a body that
+    # shifted) used to shove it a tile at a time, through walls and off the map.
+    r = subprocess.run(["node", "-e", ENGINE_SHOVE, str(B.EXPLORE_DIR / "engine.js"), str(PACK_DIR / f"maps/{name}.tmj")],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    got = json.loads(r.stdout)
+    assert got == {"shoved": 0, "offmap": 0, "inwall": 0, "escaped": True}, got
+
+
+
+ENGINE_RATE = r"""
+const fs = require("fs"); globalThis.Quest = {};
+let now = 0, queued = null;
+globalThis.performance = { now: () => now };
+globalThis.requestAnimationFrame = f => { queued = f; };
+const ctx = new Proxy({}, { get: (t, k) => (k in t ? t[k] : () => {}), set: (t, k, v) => { t[k] = v; return true; } });
+globalThis.document = { createElement: () => ({ getContext: () => ctx, width: 0, height: 0 }) };
+eval(fs.readFileSync(process.argv[1], "utf8"));
+const target = { addEventListener() {} }, parent = { appendChild() {} };
+const out = {};
+for (const hz of [30, 60, 144]) {
+  now = 0; queued = null;
+  const game = Quest.engine.create({ parent, width: 320, height: 128, background: "#000", atlas: {}, columns: 12, keyTarget: target });
+  let body;
+  game.start(api => {
+    const l = api.addLayer({ name: "walls", width: 100, height: 3, data: new Array(300).fill(0) });
+    api.collide(l);
+    body = api.addPlayer(16, 24).setVelocity(90, 0);
+    return {};
+  });
+  for (let t = 0; t <= 1000; t += 1000 / hz) { now = t; const f = queued; queued = null; f && f(); }
+  out[hz] = Math.round(body.x - 16);
+}
+console.log(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_the_engine_walks_at_the_same_speed_at_any_refresh_rate():
+    r = subprocess.run(["node", "-e", ENGINE_RATE, str(B.EXPLORE_DIR / "engine.js")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    got = json.loads(r.stdout)
+    assert all(80 <= v <= 95 for v in got.values()), got      # 90 px/s, give or take a frame
