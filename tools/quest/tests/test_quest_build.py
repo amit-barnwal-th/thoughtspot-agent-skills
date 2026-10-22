@@ -1303,7 +1303,7 @@ def test_routes_name_only_realms(doc, capture):
     ("publish_path: agentql-quest", "publish_path: Agentql Quest", "publish_path must be a folder name"),
     ("  lesson_sql: agents/cli/ts-object-model-agentql-query/references/lesson-sql.md",
      "  lesson_sql: no/such/file.md", "source 'lesson_sql' is not a file in the repo"),
-    ("explore:\n  realms: [law, mines]", "explore:\n  realms: law", "explore.realms must be a list"),
+    ("explore:\n  realms: [law, mines, lake, forests, isles]", "explore:\n  realms: law", "explore.realms must be a list"),
     ("checks: [agentql_capture, course_refs, agentql_rules]", "checks: [agentql_capture, course_refs, agentql_rules, ../build]",
      "no plugin checks/../build.py"),
     ("unlock: first_realm_first", "unlock: none", "unlock must be one of"),
@@ -3074,7 +3074,7 @@ def test_an_explore_folder_over_budget_fails_the_build(tmp_path, monkeypatch):
 
 def test_the_packs_own_maps_pass_the_checks():
     data, errors = B.compile_pack(B.Pack("agentql"))
-    assert errors == [] and data["pack"]["explore_realms"] == ["law", "mines"]
+    assert errors == [] and data["pack"]["explore_realms"] == ["law", "mines", "lake", "forests", "isles"]
     assert MAPS.check_maps(PACK_DIR, data) == []
 
 
@@ -4114,3 +4114,63 @@ def test_the_forge_and_the_dragon_are_drawn_for_every_realm():
     assert (frames["compiler"], frames["foe"]) == (139, 138)
     src = (PACK_DIR / "tiles/make_atlas.py").read_text(encoding="utf-8")
     assert "138:" in src and "139:" in src
+
+
+# ---- PR 11: the Lake, the Golden Forests and the Shifting Isles explorable ---------------------------
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+@pytest.mark.parametrize("realm", ["lake", "forests", "isles"])
+def test_each_new_realm_plays_through_the_machine(tmp_path, realm):
+    data, _ = B.compile_pack(B.Pack("agentql"))
+    quest = tmp_path / "quest.json"
+    quest.write_text(json.dumps(data), encoding="utf-8")
+    r = subprocess.run(["node", str(HERE / "play_map.js"), str(quest), str(PACK_DIR / f"maps/{realm}.tmj"), realm],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    out = json.loads(r.stdout)
+    enc = next(x for x in data["realms"] if x["id"] == realm)["encounters"][0]["id"]
+    assert out["interactions"] == [f"{enc}:{x}" for x in MAPS.ROLES] and out["saves"] == [realm]
+
+
+@pytest.mark.parametrize("realm", ["mines", "lake", "forests", "isles"])
+def test_every_realm_puts_its_forge_before_its_door_and_the_dragon_behind(realm):
+    doc = json.loads((PACK_DIR / f"maps/{realm}.tmj").read_text(encoding="utf-8"))
+    at = {o["type"]: (o["x"] // TILE, o["y"] // TILE) for o in _layer(doc, "objectgroup")["objects"]}
+    assert at["merchant"][0] < at["compiler"][0] < at["gate"][0] < at["foe"][0], at       # west to east
+    assert at["gate"][0] < at["reward"][0]
+
+
+_NEAR = ((0, 1), (0, -1), (1, 0), (-1, 0))
+
+
+@pytest.mark.parametrize("realm", ["mines", "lake", "forests", "isles"])
+def test_nothing_crowds_a_step_or_the_way_in(realm):
+    # A chest, barrel or hoard beside a step (or a barrel that rolls there) can take the talk from
+    # it; an exit right in front of the spawn takes a second Enter as "leave".
+    doc = json.loads((PACK_DIR / f"maps/{realm}.tmj").read_text(encoding="utf-8"))
+    objs = [(o["type"], o["x"] // TILE, o["y"] // TILE, {p["name"]: p["value"] for p in o.get("properties", [])})
+            for o in _layer(doc, "objectgroup")["objects"]]
+    steps = {(x, y) for t, x, y, _ in objs if t in MAPS.ROLES}
+    near = lambda x, y: {(x + dx, y + dy) for dx, dy in _NEAR}
+    for t, x, y, p in objs:
+        tiles = {(x, y)}
+        if t == "barrel":
+            dx, dy = MAPS.ROLLS[p["roll"]]
+            tiles.add((x + dx, y + dy))
+        if t in ("chest", "barrel", "hoard"):
+            assert not any(near(*tile) & steps for tile in tiles), (t, x, y)
+    (sx, sy), = [(x, y) for t, x, y, _ in objs if t == "spawn"]
+    (ex, ey), = [(x, y) for t, x, y, _ in objs if t == "exit"]
+    assert (ex, ey) not in near(sx, sy)
+
+
+WATER = {276 + f + 1 for f in (18, 19, 20, 36, 37, 38, 54, 55, 56)}     # gids of Tiny Battle's water
+
+
+@pytest.mark.parametrize("realm", ["lake", "isles"])
+def test_walkable_water_is_always_bridged(realm):
+    doc = json.loads((PACK_DIR / f"maps/{realm}.tmj").read_text(encoding="utf-8"))
+    layer = lambda name: next(l for l in doc["layers"] if l["name"] == name)["data"]
+    floor, walls, decor = layer("floor"), layer("walls"), layer("decor")
+    open_water = [i for i, g in enumerate(floor) if g in WATER and not walls[i]]
+    assert open_water and all(decor[i] for i in open_water)
