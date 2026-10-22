@@ -3054,7 +3054,7 @@ def test_a_spawn_on_the_edge_leaves_it_open(tmp_path):
 
 # ---- PR 5: the explore front end (design §4) ------------------------------------------------------
 
-EXPLORE_FILES = ["index.html", "explore.js", "engine.js", "core.js", "quest.css", "fonts.css", "art.json",
+EXPLORE_FILES = ["tiles/LICENSE-adventure-awaits.txt", "index.html", "explore.js", "engine.js", "core.js", "quest.css", "fonts.css", "art.json",
                  "tiles.json", "tiles/tiles.png", "tiles/LICENSE-kenney.txt", "maps/overworld.tmj", "maps/mines.tmj",
                  B.EXPLORE_MARK, "fonts/LICENSE-vt323.txt", "fonts/LICENSE-ibm-plex-mono.txt"]
 
@@ -3342,7 +3342,7 @@ def test_the_packs_tiles_name_every_frame_the_explore_page_draws():
 
 @pytest.mark.parametrize("edit,needle", [
     (lambda f: f.pop("gate"), "needs 'gate'"),
-    (lambda f: f.update(gate=480), "'gate' must be a frame of tiles.png, 0 to 479"),
+    (lambda f: f.update(gate=504), "'gate' must be a frame of tiles.png, 0 to 503"),
     (lambda f: f.update(gate="28"), "'gate' must be a frame"),
     (lambda f: f.update(gate=True), "'gate' must be a frame"),
     (lambda f: f.update(gate=-1), "'gate' must be a frame"),
@@ -3359,12 +3359,12 @@ def test_a_broken_tile_index_fails_the_build(tmp_path, monkeypatch, edit, needle
 
 
 @pytest.mark.parametrize("edit,needle", [
-    (lambda m: m["tilesets"][0].update(imagewidth=176), "says its image is 176x640, but ../tiles/tiles.png is 192x640"),
-    (lambda m: m["tilesets"][0].update(tilecount=200), "must have tilecount 480 and columns 12"),
-    (lambda m: m["tilesets"][0].update(columns=11), "must have tilecount 480 and columns 12"),
+    (lambda m: m["tilesets"][0].update(imagewidth=176), "says its image is 176x672, but ../tiles/tiles.png is 192x672"),
+    (lambda m: m["tilesets"][0].update(tilecount=200), "must have tilecount 504 and columns 12"),
+    (lambda m: m["tilesets"][0].update(columns=11), "must have tilecount 504 and columns 12"),
     (lambda m: m["tilesets"][0].update(firstgid=2), "needs firstgid 1"),
     (lambda m: m["tilesets"][0].update(image="../maps/mines.tmj"), "is not in the pack"),
-    (lambda m: next(l for l in m["layers"] if l["name"] == "decor")["data"].__setitem__(0, 481), "uses a tile past t"),
+    (lambda m: next(l for l in m["layers"] if l["name"] == "decor")["data"].__setitem__(0, 505), "uses a tile past t"),
 ])
 def test_a_map_must_match_its_tileset(tmp_path, monkeypatch, edit, needle):
     packs = _copy_packs(tmp_path)
@@ -3937,12 +3937,13 @@ def test_an_unknown_png_filter_is_an_error(tmp_path):
 
 def test_the_atlas_must_be_8_bit_rgba(tmp_path, monkeypatch):
     packs = _copy_packs(tmp_path)
-    (packs / "agentql/tiles/tiles.png").write_bytes(_png_rows([bytes(192 * 4)] * 640, [0], colour=6).replace(
-        b"IHDR" + (192).to_bytes(4, "big") + (640).to_bytes(4, "big") + bytes([8, 6]),
-        b"IHDR" + (192).to_bytes(4, "big") + (640).to_bytes(4, "big") + bytes([8, 2])))
+    h = MAPS._png_size(packs / "agentql/tiles/tiles.png")[1]     # the real size, so only the format is wrong
+    (packs / "agentql/tiles/tiles.png").write_bytes(_png_rows([bytes(192 * 4)] * h, [0], colour=6).replace(
+        b"IHDR" + (192).to_bytes(4, "big") + h.to_bytes(4, "big") + bytes([8, 6]),
+        b"IHDR" + (192).to_bytes(4, "big") + h.to_bytes(4, "big") + bytes([8, 2])))     # colour type 2: RGB
     monkeypatch.setattr(B, "PACKS", packs)
     errors = B.build(check=True)[3]
-    assert any("tiles/tiles.png" in e for e in errors), errors
+    assert any("must be an 8-bit RGBA PNG" in e for e in errors), errors
 
 
 def test_guards_have_their_own_looks():
@@ -4286,3 +4287,70 @@ def test_a_classic_folder_that_is_not_the_builds_survives_a_build_without_home(t
         keep = target / B.EXPLORE_MARK
     _agentql_with(tmp_path, monkeypatch, ("  home: true ", "  home: false "))
     assert keep.exists() and (site / "classic").exists()
+
+# ---- art: a mountain for the Mines, an ornate library for Law, a leafy lane for the Forests --------
+
+def test_the_scenes_use_their_new_art_and_it_is_licensed():
+    frames = json.loads((PACK_DIR / "tiles/tiles.json").read_text(encoding="utf-8"))
+    assert (frames["portals"]["mines"], frames["portals"]["law"], frames["portals"]["forests"]) == (490, 494, 498)
+    licence = (PACK_DIR / "tiles/LICENSE-adventure-awaits.txt").read_text(encoding="utf-8")
+    assert "Creative Commons Zero, CC0" in licence and "Frames 480-490" in licence
+    atlas = (PACK_DIR / "tiles/make_atlas.py").read_text(encoding="utf-8")
+    assert "877ef33819d9271e07bbaecf282ebdac3656df51066e43de28956ebca0c6691b" in atlas   # the zip the slices came from
+    world = json.loads((PACK_DIR / "maps/overworld.tmj").read_text(encoding="utf-8"))
+    layer = lambda name: next(l for l in world["layers"] if l["name"] == name)["data"]
+    walls, floor, w = layer("walls"), layer("floor"), world["width"]
+    at = {(o["type"], (o["properties"][0]["value"] if o["properties"] else None)): (o["x"] // TILE, o["y"] // TILE)
+          for o in _layer(world, "objectgroup")["objects"]}
+    lx, ly = at[("portal", "law")]
+    assert walls[ly * w + lx - 1] == walls[ly * w + lx + 1] == 491 + 1           # a column either side of Law's door
+    assert walls[(ly - 1) * w + lx] == 492 + 1                                    # its pediment over it
+    fx, fy = at[("portal", "forests")]
+    assert all(floor[fy * w + x] == 499 + 1 for x in range(fx - 12, fx))          # the leafy lane up to the arch
+    mx, my = at[("portal", "mines")]
+    assert my == 1 and walls[mx] in (480 + 1, 481 + 1, 482 + 1)                   # the tunnel in the cliff, grass above
+
+
+@pytest.mark.parametrize("layer,frame", [("decor", 500), ("walls", 501)])
+def test_a_map_drawing_an_empty_frame_fails_the_build(tmp_path, monkeypatch, layer, frame):
+    packs = _copy_packs(tmp_path)
+    p = packs / "agentql/maps/overworld.tmj"
+    world = json.loads(p.read_text(encoding="utf-8"))
+    next(l for l in world["layers"] if l["name"] == layer)["data"][world["width"] * 4 + 3] = frame + 1
+    p.write_text(json.dumps(world), encoding="utf-8")
+    monkeypatch.setattr(B, "PACKS", packs)
+    errors = B.build(check=True)[3]
+    assert any(f"maps/overworld.tmj: draws frame {frame}, which tiles.png leaves empty" in e for e in errors), errors
+
+
+def test_the_cliff_slices_are_the_packs_own_in_place():
+    # west, middle, east as they sit in Adventure Awaits' own sheet (a review found them mirrored)
+    src = (PACK_DIR / "tiles/make_atlas.py").read_text(encoding="utf-8")
+    assert "ADVENTURE = {480: 86, 481: 93, 482: 92, 483: 87, 484: 104, 485: 104, 486: 103, 487: 106, 488: 107, 489: 108," in src
+    licence = (PACK_DIR / "tiles/LICENSE-adventure-awaits.txt").read_text(encoding="utf-8")
+    assert "Slice 86, 93, 92, 87, 104, 104, 103, 106,\n107, 108 and 113" in licence
+
+
+def test_the_scenes_floors_and_the_cliffs_foot():
+    # (from the review of #661: each of these regressed silently before)
+    world = json.loads((PACK_DIR / "maps/overworld.tmj").read_text(encoding="utf-8"))
+    layer = lambda name: next(l for l in world["layers"] if l["name"] == name)["data"]
+    floor, decor, w = layer("floor"), layer("decor"), world["width"]
+    at = {(o["type"], (o["properties"][0]["value"] if o["properties"] else None)): (o["x"] // TILE, o["y"] // TILE)
+          for o in _layer(world, "objectgroup")["objects"]}
+    gx, gy = at[("npc", "wizard_guard")]
+    assert floor[gy * w + gx] - 1 in (48, 49, 50, 51)                            # Law's guard on the plaza's sand
+    fx, fy = at[("portal", "forests")]
+    assert floor[fy * w + fx] - 1 == 144                                          # the arch of leaves on grass
+    mx, my = at[("portal", "mines")]
+    assert decor[(my + 1) * w + mx - 2] - 1 in (487, 488, 489)                    # the cliff's foot along the yard (not under the rails)
+    assert all(floor[x] for x in range(14))                                       # the rock has a floor under it
+    src = (PACK_DIR / "tiles/make_atlas.py").read_text(encoding="utf-8")
+    assert "490: 113}" in src and "SAND_TO_KENNEY" in src and "GRASS_TO_KENNEY" in src
+
+
+def test_a_map_with_bad_layers_is_reported_not_a_traceback(tmp_path, monkeypatch):
+    packs = _copy_packs(tmp_path)
+    (packs / "agentql/maps/overworld.tmj").write_text(json.dumps({"layers": "nope"}), encoding="utf-8")
+    monkeypatch.setattr(B, "PACKS", packs)
+    assert B.build(check=True)[3]                                                 # errors, and no exception
