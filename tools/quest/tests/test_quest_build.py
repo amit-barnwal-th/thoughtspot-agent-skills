@@ -3765,7 +3765,7 @@ def test_the_atlas_is_the_one_recorded():
 
 @pytest.mark.parametrize("edit", [
     lambda f: f["portals"].update(forests=140),          # an invisible door
-    lambda f: f["npcs"].update(golden_elf=139),          # an invisible guard
+    lambda f: f["npcs"].update(golden_elf=142),          # an invisible guard
     lambda f: f.update(chest=141),
 ])
 def test_a_name_pointing_at_an_empty_frame_fails_the_build(tmp_path, monkeypatch, edit):
@@ -4084,3 +4084,33 @@ def test_the_view_can_grow_to_the_whole_map():
     assert got["before"] > 0                                     # 20x8 of a 40x14 map: the camera followed
     assert got["canvas"] == [640, 224] and got["camera"] == [640, 224, 0, 0]
     assert got["atResize"] >= 560 and got["frame"] >= 560        # every tile drawn, at once and after
+
+
+# ---- PR 10: the Mines made clearer ----------------------------------------------------------------
+
+def test_the_mines_read_west_to_east_to_a_lit_door():
+    mines = json.loads((PACK_DIR / "maps/mines.tmj").read_text(encoding="utf-8"))
+    at = {o["type"]: (o["x"] // TILE, o["y"] // TILE) for o in _layer(mines, "objectgroup")["objects"]}
+    gx, gy = at["gate"]
+    fx, fy = at["compiler"]
+    # the merchant, the guide and the Forge before the door; the dragon and its hoard behind it
+    assert at["merchant"][0] < fx < gx < at["foe"][0] and at["guide"][0] < gx < at["reward"][0]
+    w = mines["width"]
+    layer = lambda name: next(l for l in mines["layers"] if l["name"] == name)["data"]
+    walls, decor = layer("walls"), layer("decor")
+    frames = json.loads((PACK_DIR / "tiles/tiles.json").read_text(encoding="utf-8"))
+    wall = frames["wall"] + 1
+    # the Forge on the north wall, an anvil either side, a torch over each anvil
+    assert fy == 1 and walls[fx] == wall and walls[fy * w + fx - 1] == walls[fy * w + fx + 1] == 75
+    torch = decor[fx - 2]
+    assert torch == decor[fx + 2] and torch
+    # a torch over the door, on its face; mine track (frame 70) from the forge hall up to the door
+    assert decor[(gy - 1) * w + gx] == torch and walls[(gy - 1) * w + gx] == wall
+    assert all(decor[gy * w + x] == 71 for x in range(fx - 5, gx))
+
+
+def test_the_forge_and_the_dragon_are_drawn_for_every_realm():
+    frames = json.loads((PACK_DIR / "tiles/tiles.json").read_text(encoding="utf-8"))
+    assert (frames["compiler"], frames["foe"]) == (139, 138)
+    src = (PACK_DIR / "tiles/make_atlas.py").read_text(encoding="utf-8")
+    assert "138:" in src and "139:" in src
