@@ -219,8 +219,12 @@ explore page would read differently from the check:
   each encounter's merchant, guide, compiler, foe, reward). Before each step, a flood-fill from the
   spawn, with only the gates whose required steps are all **done** open, must reach that step's
   object; the exit must be reachable from the start. A gate that only opens after a step behind it,
-  or a first step behind a gate, fails. Objects are solid; reaching one means standing on a
-  walkable tile next to it.
+  or a first step behind a gate, fails, and so does a gate that guards nothing:
+  at some point of play while it is shut, opening it alone must let the player reach an object
+  they couldn't (a gate off its doorway, or a wall with a way round it, would not). Here a barrel
+  is played: rolled once it can be reached, it frees its tile (unless a hoard is under it) and
+  blocks the one it lands on. Objects are solid; reaching one means standing on a walkable tile
+  next to it.
 - **No Tiled templates,** which the explore page doesn't resolve.
 
 `Quest.machine` accepts `interact {step}` only for the step the current screen waits on
@@ -263,7 +267,12 @@ packs/agentql/tiles/, maps/*.tmj           ─┘                 └─► expl
   editing `make_atlas.py`, rebuild `tiles.png` and record its new hash.
   `tiles/tiles.json` names the frame for everything the page draws, a door per realm and how each
   person looks; the build checks it.
-- **The overworld** is a small world the camera scrolls (40x14): a plaza with Elder Wren, and a
+- **The view** shows as much of the map as fits at 1.25 screen pixels a game pixel or more, and as
+  many rows as fit in 70% of the window at that size, so on a laptop the whole overworld shows at
+  once; the camera follows the player over the rest. It is never fewer than 20x8 tiles, so on a
+  phone the scale goes below 1.25, and a map smaller than that sits in a 20x8 view. **Dialogs** show who you're
+  talking to, drawn from the map's art, and not the classic page's ASCII art.
+- **The overworld** is a small world (40x14): a plaza with Elder Wren (who says which way each realm's door lies), and a
   door for each realm in its own scene, each with a guard beside it who says in one line what the
   realm is for. Leaving a realm, by its exit, by finishing it, or by the classic page's link back
   (`explore/#from=<realm>`), puts you back beside its door. The scenes: a
@@ -271,6 +280,11 @@ packs/agentql/tiles/, maps/*.tmj           ─┘                 └─► expl
   over a moat and a plank bridge between pillars (Law, a wizard), a pier to a small town in the lake
   (the Lake, a fisherman), a tunnel of golden trees (the
   Golden Forests, an elf in golden armour), and a dock with a boat out to sea (the Isles, a sailor).
+- **Law** is a library of four reading rooms in a row, a bookshelf either side of each throne.
+  A petitioner stands before each throne (a throne's optional `look`, from `tiles.json`'s npcs);
+  talking to them opens the hall's questions, and the gate to the next room stays shut until
+  that hall is done. After the last hall the realm's decree is shown; Esc closes it like any
+  dialog, and talking to a throne shows it again until you leave.
 - **Fun:** talk to a chest to open it (its loot is yours, or a mimic snaps at you), to a barrel to
   roll it aside, and to the troll's hoard it uncovers to claim it. You start with the weapon
   `tiles.json` names; others come as loot, and X (or the pad's Weapon) switches the one in your
@@ -286,14 +300,20 @@ packs/agentql/tiles/, maps/*.tmj           ─┘                 └─► expl
 - **Play:** arrow keys or the touch pad walk; Enter, Space or the pad's talk button talks to whoever
   is next to you (up, down, left or right; the one the game waits on first), but only while the
   map has focus, so links and buttons keep Enter and Space; number keys pick in a dialog; Esc
-  closes it ("not now"; the step waits). Standing by a portal names its realm and how you did
-  there. S and M switch sound.
+  (or "Back to the realm") closes it ("not now"; the step waits), and in a realm "Leave for the
+  world map" goes back out beside its door (a quest left unfinished is not saved, as by the exit).
+  Standing by a portal names its realm and how you did there; by the step the game waits on, how
+  to talk to it; by a shut gate, that it is locked until the questions on this side are answered
+  (a barred door). S and M switch sound.
 - **Checks:** the build checks the maps (above) and the tile index; `tests/play_map.js` walks
   each map through the machine with no canvas. In a real browser,
   `python3 tools/quest/tests/smoke_explore.py` builds the site, serves it, and plays each
   explorable realm in headless Chrome (`explore/#smoke=<realm>`): locked for a fresh player, the
-  map loads, every step talked to in order, the gate shut exactly until its steps are done, the
-  realm saved, Enter on a link left alone, no request outside the site, and the fun and the people
+  map loads, every step talked to in order, each gate drawn and solid exactly until its own steps
+  are done and pushed against while shut, the locked and talk hints only where they belong, a
+  petitioner drawn for each throne with a look, the dialog's portrait (and no ASCII art), "Leave
+  for the world map" handing back the map beside the realm's door, the decree of a realm of halls
+  shown, kept by Esc and shown again, the realm saved, Enter on a link left alone, no request outside the site, and the fun and the people
   (all with page-script events, not the browser's own input). pytest runs it wherever
   Chrome is installed, CI included. The scripted play writes saves, so it runs only on a local
   server (`127.0.0.1` or `localhost`). Touch, screen reader and cross-browser checks are a manual

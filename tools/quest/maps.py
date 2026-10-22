@@ -10,7 +10,7 @@ such realm, saved by Tiled 1.10 or later as JSON with tilesets embedded. On a ma
         portal   to=<realm id>     overworld only: enters a realm
         exit                       realm maps only: back to the overworld
         merchant|guide|compiler|foe|reward   encounter=<encounter id>
-        throne   hall=<hall id>
+        throne   hall=<hall id> [look=<npc look>]   a hall; with a look, a petitioner stands for it
         gate     requires=<step id>,<step id>,...   blocks its tiles until those steps are DONE
   - a step id is "<encounter id>:<merchant|guide|compiler|foe|reward>" or "hall:<hall id>".
 
@@ -27,6 +27,10 @@ next to it (up, down, left or right). The game plays a realm's steps in one orde
 which tests pin to Quest.machine's expected()), so the check walks that order: before each step,
 a flood-fill from the spawn with only the gates whose required steps are all done open must reach
 that step's object. The exit must be reachable from the start, so a player can always leave.
+Every gate must guard something: at some point of play while it is shut, opening it alone must
+let the player reach an object they couldn't (a gate off its doorway, or a wall with a way round
+it, would not). Barrels are played: each may be rolled once reachable, freeing its tile unless a
+hoard is under it, and blocking the tile it lands on; every set of rolls is tried.
 """
 from __future__ import annotations
 
@@ -42,6 +46,9 @@ PROPS = {"spawn": set(), "exit": set(), "portal": {"to"}, "throne": {"hall"}, "g
          # strings.yaml) or `about` (a realm, described from its own content)
          "npc": {"look", "says", "about"},
          **{role: {"encounter"} for role in ROLES}}
+# Properties an object may have as well: a throne's `look` puts a person there (tiles.json npcs),
+# the petitioner you talk to; without one the throne itself is drawn.
+OPTIONAL = {"throne": {"look"}}
 REALM_TYPES = set(PROPS) - {"portal"}
 OVERWORLD_TYPES = {"spawn", "portal", "gate", "chest", "barrel", "hoard", "npc"}
 EXTRAS = ("chest", "barrel", "hoard", "npc")
@@ -333,6 +340,47 @@ def reachability(m: Map, steps: list[str] | None = None) -> list[str]:
                           + (f" (still shut: {'; '.join(shut)})" if shut else ""))
             break       # every later step waits on this one
         done.add(s)
+    # A gate guards something: at some point of play while it is shut, opening it alone lets the
+    # player reach an object they can't reach with it shut. Barrels are played, not assumed: each
+    # stands where it is until the player can reach it, then may or may not be rolled (its tile
+    # frees unless a hoard is under it, which is solid; the tile it lands on blocks). The walk
+    # counts every tile seen in every set of rolls the player could make.
+    if not errors:
+        objs = [o for o in m.objects if o["type"] not in ("spawn", "gate")]
+        barrels = m.of("barrel")
+        fixed = {o["tile"] for o in objs if o["type"] != "barrel"}      # people, chests, hoards...
+
+        def flood(blocked: set) -> set[tuple[int, int]]:
+            seen, todo = {start}, [start]
+            while todo:
+                for n in _near(todo.pop()):
+                    if m.inside(n) and n not in seen and n not in blocked:
+                        seen.add(n)
+                        todo.append(n)
+            return seen
+
+        def seen_with(done: set[str], also: dict | None = None) -> frozenset[int]:
+            shut = {t for g, needs in gates if g is not also and not set(needs) <= done for t in g["rect"]}
+            seen_all: set[tuple[int, int]] = set()
+            states, todo = {frozenset()}, [frozenset()]          # which barrels are rolled
+            while todo:
+                rolled_now = todo.pop()
+                blocked = (m.wall | fixed | shut | {b["tile"] for i, b in enumerate(barrels) if i not in rolled_now}
+                           | {rolled(barrels[i]) for i in rolled_now})
+                seen = flood(blocked)
+                seen_all |= seen
+                for i, b in enumerate(barrels):                   # roll any one more the player can reach
+                    nxt = rolled_now | {i}
+                    if i not in rolled_now and nxt not in states and any(n in seen for n in _near(b["tile"])):
+                        states.add(nxt)
+                        todo.append(nxt)
+            return frozenset(i for i, o in enumerate(objs) if any(n in seen_all for n in _near(o["tile"])))
+
+        points = [set((steps or [])[:i]) for i in range(len(steps or []) + 1)]
+        shut_at = {i: seen_with(done) for i, done in enumerate(points)}
+        for g, needs in gates:
+            if not any(seen_with(done, g) - shut_at[i] for i, done in enumerate(points) if not set(needs) <= done):
+                errors.append(f"{g['where']}: guards nothing (opening it alone, while it is shut, lets the player reach nothing new)")
     # Every bit of fun can be found by the end: chests and barrels where they stand, a hoard once its
     # barrel has rolled off it (with every gate open).
     every = {x for g, needs in gates for x in needs}
@@ -360,9 +408,13 @@ def _shape(m: Map, allowed: set[str], errors: list[str]) -> None:
             if not ok:
                 errors.append(f"{o['where']}: needs look, and either says or about")
             continue
-        missing, extra = PROPS[o["type"]] - set(o["props"]), set(o["props"]) - PROPS[o["type"]]
+        missing = PROPS[o["type"]] - set(o["props"])
+        extra = set(o["props"]) - PROPS[o["type"]] - OPTIONAL.get(o["type"], set())
         if missing or extra:
-            errors.append(f"{o['where']}: needs exactly the properties {sorted(PROPS[o['type']]) or 'none'}")
+            errors.append(f"{o['where']}: needs exactly the properties {sorted(PROPS[o['type']]) or 'none'}"
+                          + (f" (and may have {sorted(OPTIONAL[o['type']])})" if o["type"] in OPTIONAL else ""))
+        if o["type"] == "throne" and "look" in o["props"] and o["props"]["look"] not in m.npcs:
+            errors.append(f"{o['where']}: look={o['props']['look']!r} is not one of tiles/tiles.json's npcs")
         if o["type"] == "gate":
             if not all(m.inside(t) for t in o["rect"]):
                 errors.append(f"{o['where']}: is not wholly on the map")

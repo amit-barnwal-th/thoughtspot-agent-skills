@@ -149,7 +149,7 @@ lexicon:                               # the roles the engine knows, named the p
   reward: hoard
   currency: gold
 explore:
-  realms: [mines]                      # realms with a map; others are played in classic mode
+  realms: [law, mines]                 # realms with a map; others are played in classic mode
 ```
 
 The build refuses two packs that share an `id`, a `publish_path` or a `storage_key`. Every pack is
@@ -377,18 +377,18 @@ Dwarven Mines, about 2–3 minutes:
 **The overworld and Law:**
 - The overworld is a small map with the five realm portals. Sealed realms show a closed gate,
   and finished realms show your best gold.
-- The Kingdom of Law, once mapped, is four rooms, one per hall. A throne asks each hall's trials,
-  and the decree waits at the gate.
+- The Kingdom of Law is four rooms, one per hall (PR 9). A throne asks each hall's trials, a
+  gate between rooms opens once the hall before it is done, and the decree follows the last
+  hall's last question in the same dialog.
 
 **Unlocking in the prototype:**
 - **The same rule in both front ends.** The shared `unlock` rule applies to both, so a new player
   must finish Law first.
-- **Law opens in classic mode.** Law has no map yet, so its portal opens
-  `/agentql-quest/#realm=law`. Classic gains that deep link in PR 5 (today it always starts at
-  the title), plus a "back to the map" link when it was opened from explore.
+- **A realm without a map opens in classic mode** at its gate (`/agentql-quest/#realm=<id>`),
+  with a "back to the map" link (PR 5). Until PR 9 that was Law too.
 - **Saves are shared.** Classic (`/agentql-quest/`) and explore (`/agentql-quest/explore/`) share
   an origin and the `aqq` saves. Explore re-reads them on `pageshow` and before every portal
-  check, so returning with Back shows Law as done and the Mines as open.
+  check, so returning with Back from a realm played in classic shows it as done.
 
 ### 4.4 Questions as HTML over the game
 
@@ -510,6 +510,10 @@ kept, and the character can be asked again.
 8. **A world for the doors:** Tiny Town and Tiny Battle (CC0) join the atlas; the overworld becomes
    a scrolling world with a scene per realm (a mountain tunnel, a library over a moat, a pier, a
    tree tunnel, a boat) and a guard per realm, dressed for it, with one short line each.
+9. **Law explorable:** a library of four reading rooms, a petitioner before each hall's throne, a
+   barred door between rooms that says it is locked and opens when the hall before it is done,
+   and the decree at the end. Asked for in play: a dialog in a realm offers "Back to the realm"
+   and "Leave for the world map", and Elder Wren says which way each realm's door lies.
 
 **Then:** you play it, and the remaining realms get maps.
 

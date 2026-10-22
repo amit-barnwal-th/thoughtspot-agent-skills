@@ -1303,7 +1303,7 @@ def test_routes_name_only_realms(doc, capture):
     ("publish_path: agentql-quest", "publish_path: Agentql Quest", "publish_path must be a folder name"),
     ("  lesson_sql: agents/cli/ts-object-model-agentql-query/references/lesson-sql.md",
      "  lesson_sql: no/such/file.md", "source 'lesson_sql' is not a file in the repo"),
-    ("explore:\n  realms: [mines]", "explore:\n  realms: mines", "explore.realms must be a list"),
+    ("explore:\n  realms: [law, mines]", "explore:\n  realms: law", "explore.realms must be a list"),
     ("checks: [agentql_capture, course_refs, agentql_rules]", "checks: [agentql_capture, course_refs, agentql_rules, ../build]",
      "no plugin checks/../build.py"),
     ("unlock: first_realm_first", "unlock: none", "unlock must be one of"),
@@ -2897,6 +2897,17 @@ def test_a_map_plays_one_realm_shape(tmp_path):
 
 # ---- third review of PR 4 -----------------------------------------------------------------------
 
+@pytest.mark.parametrize("rows,gate", [
+    # a way round the gate: over the top of its wall and down to the reward
+    (["############", "#S.M.G.....#", "#.......#F.#", "#.C........#", "#X......#R.#", "############"], CAVE_GATE),
+    # the gate stands in the open, not in its doorway at (8, 3)
+    (CAVE_ROWS, [("the_rune:compiler", [(5, 2)])]),
+])
+def test_a_gate_that_guards_nothing_fails(tmp_path, rows, gate):
+    pack, data = _explorable(tmp_path, cave=_tmj(rows, CAVE_OBJECTS, gate))
+    assert any("guards nothing" in e for e in MAPS.check_maps(pack.dir, data))
+
+
 def test_the_exit_behind_a_gate_map_is_fine_without_the_gate(tmp_path):
     # So the exit-behind-a-gate test fails for the gate, not for the walls.
     rows = ["############", "#S.M.G..#F.#", "#.......#..#", "#.C.......X#", "#.......#R.#", "############"]
@@ -3063,7 +3074,7 @@ def test_an_explore_folder_over_budget_fails_the_build(tmp_path, monkeypatch):
 
 def test_the_packs_own_maps_pass_the_checks():
     data, errors = B.compile_pack(B.Pack("agentql"))
-    assert errors == [] and data["pack"]["explore_realms"] == ["mines"]
+    assert errors == [] and data["pack"]["explore_realms"] == ["law", "mines"]
     assert MAPS.check_maps(PACK_DIR, data) == []
 
 
@@ -3077,6 +3088,19 @@ def test_the_mines_map_plays_through_the_machine(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     out = json.loads(r.stdout)
     assert out["interactions"] == [f"west_sales:{x}" for x in MAPS.ROLES] and out["saves"] == ["mines"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_the_law_map_plays_through_the_machine(tmp_path):
+    data, _ = B.compile_pack(B.Pack("agentql"))
+    quest = tmp_path / "quest.json"
+    quest.write_text(json.dumps(data), encoding="utf-8")
+    r = subprocess.run(["node", str(HERE / "play_map.js"), str(quest), str(PACK_DIR / "maps/law.tmj"), "law"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    out = json.loads(r.stdout)
+    halls = [h["id"] for h in next(x for x in data["realms"] if x["id"] == "law")["halls"]]
+    assert out["interactions"] == [f"hall:{h}" for h in halls] and out["saves"] == ["law"]
 
 
 DEEP_LINK = r"""
@@ -3124,8 +3148,11 @@ def test_the_classic_page_opens_at_a_realm_from_the_explore_map(tmp_path, hash, 
 
 
 GOOD_SMOKE = ["MAP overworld", "LOCKED mines", "MAP mines", "MAP overworld",
-              "SMOKE mines west_sales:merchant[gate-shut] west_sales:guide[gate-shut] west_sales:compiler[gate-shut] "
-              "west_sales:foe west_sales:reward | {\"done\":true,\"best\":0}", "EXIT mines"]
+              "SMOKE mines west_sales:merchant[gates:1] west_sales:guide[gates:1] west_sales:compiler[gates:1] "
+              "west_sales:foe[gates:0] west_sales:reward[gates:0] | {\"done\":true,\"best\":0}", "EXIT mines"]
+GOOD_LAW_SMOKE = ["MAP overworld", "MAP law", "DECREE law", "MAP overworld",
+                  "SMOKE law hall:two_paths[gates:111] hall:checking[gates:011] hall:forge[gates:001] "
+                  "hall:third_engine[gates:000] | {\"done\":true,\"best\":0}", "EXIT law"]
 
 
 @pytest.mark.parametrize("edit,needle", [
@@ -3135,9 +3162,11 @@ GOOD_SMOKE = ["MAP overworld", "LOCKED mines", "MAP mines", "MAP overworld",
     (lambda log: log + ["ERROR smoke: timed out"], "ERROR smoke"),
     (lambda log: log[:-2] + log[-1:], "no SMOKE line"),
     (lambda log: log[:-1], "the exit of mines didn't take the player back"),
-    (lambda log: log[:-2] + [log[-2].replace("west_sales:foe ", ""), log[-1]], "steps"),
-    (lambda log: log[:-2] + [log[-2].replace("west_sales:foe", "west_sales:foe[gate-shut]"), log[-1]], "at west_sales:foe the gate is shut"),
-    (lambda log: log[:-2] + [log[-2].replace("compiler[gate-shut]", "compiler"), log[-1]], "at west_sales:compiler the gate is open"),
+    (lambda log: log[:-2] + [log[-2].replace("west_sales:foe[gates:0] ", ""), log[-1]], "steps"),
+    (lambda log: log[:-2] + [log[-2].replace("foe[gates:0]", "foe[gates:1]"), log[-1]], "at west_sales:foe gate 1 is shut"),
+    (lambda log: log[:-2] + [log[-2].replace("compiler[gates:1]", "compiler[gates:0]"), log[-1]], "at west_sales:compiler gate 1 is open"),
+    (lambda log: log[:-2] + [log[-2].replace("compiler[gates:1]", "compiler"), log[-1]], "the page logged 0 gates, the map has 1"),
+    (lambda log: log[:-2] + [log[-2].replace("compiler[gates:1]", "compiler[gates:x]"), log[-1]], "gate 1 is drawn but not solid"),
     (lambda log: log[:-2] + [log[-2].replace('{"done":true,"best":0}', "null"), log[-1]], "was not saved as finished"),
 ])
 def test_the_explore_smoke_reads_the_page_log(edit, needle):
@@ -3145,6 +3174,21 @@ def test_the_explore_smoke_reads_the_page_log(edit, needle):
     import smoke_explore as SX
     data, _ = B.compile_pack(B.Pack("agentql"))
     problems = SX.check("mines", edit(list(GOOD_SMOKE)) if edit else list(GOOD_SMOKE), data)
+    assert (problems == []) if needle is None else any(needle in p for p in problems), problems
+
+
+@pytest.mark.parametrize("edit,needle", [
+    (None, None),
+    # each gate is read on its own: the middle one open a hall early
+    (lambda log: [x.replace("two_paths[gates:111]", "two_paths[gates:101]") for x in log], "at hall:two_paths gate 2 is open"),
+    (lambda log: [x.replace("forge[gates:001]", "forge[gates:011]") for x in log], "at hall:forge gate 2 is shut"),
+    (lambda log: [x for x in log if x != "DECREE law"], "the decree of law wasn't shown"),
+])
+def test_the_explore_smoke_reads_each_gate_and_the_decree(edit, needle):
+    sys.path.insert(0, str(HERE))
+    import smoke_explore as SX
+    data, _ = B.compile_pack(B.Pack("agentql"))
+    problems = SX.check("law", edit(list(GOOD_LAW_SMOKE)) if edit else list(GOOD_LAW_SMOKE), data)
     assert (problems == []) if needle is None else any(needle in p for p in problems), problems
 
 
@@ -3911,3 +3955,132 @@ def test_an_item_pointing_at_an_empty_frame_fails_the_build(tmp_path, monkeypatc
     f.write_text(json.dumps(frames), encoding="utf-8")
     monkeypatch.setattr(B, "PACKS", packs)
     assert any("items.dagger is frame 140" in e for e in B.build(check=True)[3])
+
+
+# ---- PR 9: a petitioner for each hall --------------------------------------------------------------
+
+@pytest.mark.parametrize("props,needle", [
+    ({"hall": "first", "look": "elder"}, None),
+    ({"hall": "first", "look": "zqxvorn"}, "look='zqxvorn' is not one of tiles/tiles.json's npcs"),
+    ({"hall": "first", "says": "claim_true"}, "needs exactly the properties ['hall'] (and may have ['look'])"),
+])
+def test_a_throne_may_have_a_petitioner(tmp_path, props, needle):
+    objects = dict(SHORE_OBJECTS, **{"1": ("throne", props)})
+    pack, data = _explorable_shore(tmp_path, _tmj(SHORE_ROWS, objects, SHORE_GATE))
+    (pack.dir / "tiles/tiles.json").write_text(json.dumps({"items": FUN_ITEMS, "npcs": FUN_NPCS}), encoding="utf-8")
+    errors = MAPS.check_maps(pack.dir, data)
+    assert (errors == []) if needle is None else any(needle in e for e in errors), errors
+
+
+def test_every_law_hall_has_a_petitioner_and_elder_wren_points_the_way():
+    law = json.loads((PACK_DIR / "maps/law.tmj").read_text(encoding="utf-8"))
+    thrones = [o for layer in law["layers"] if layer["type"] == "objectgroup" for o in layer["objects"] if o["type"] == "throne"]
+    looks = [next(p["value"] for p in o["properties"] if p["name"] == "look") for o in thrones]
+    assert len(set(looks)) == len(thrones) == 4
+    strings = yaml.safe_load((PACK_DIR / "strings.yaml").read_text(encoding="utf-8"))
+    said = " ".join(strings[k] for k in ("npc_elder_order", "npc_elder_west", "npc_elder_east"))
+    for realm in ("Law", "Mines", "Lake", "Forests", "Isles"):
+        assert realm in said, realm
+
+
+@pytest.mark.parametrize("edits,roll,round_it", [
+    # rolled down, the barrel frees a hole in the wall: a way round the gate to the reward
+    ([(8, 1, "b"), (8, 2, "."), (10, 3, ".")], "down", True),
+    # rolled right, it lands on the hole's only way on: still no way round
+    ([(8, 1, "b"), (10, 3, ".")], "right", False),
+])
+def test_a_barrel_is_rolled_when_judging_a_gate(tmp_path, edits, roll, round_it):
+    errors = _fun_cave(tmp_path, {"b": ("barrel", {"roll": roll})}, _rows(*edits))
+    assert any("guards nothing" in e for e in errors) == round_it, errors
+
+
+@pytest.mark.parametrize("gates,needle", [
+    # two doors into one room, opening after the same step: each matters while both are shut
+    ([("the_rune:compiler", [(8, 3)]), ("the_rune:compiler", [(8, 1)])], None),
+    # a second way in through a gate that opens later (after the foe): the first still matters
+    ([("the_rune:compiler", [(8, 3)]), ("the_rune:foe", [(8, 1)])], None),
+    # the same second way, always open: the first guards nothing
+    ([("the_rune:compiler", [(8, 3)])], "guards nothing"),
+])
+def test_gates_are_judged_in_the_order_of_play(tmp_path, gates, needle):
+    # the foe's room has a second doorway at (8, 1), and is open on to the reward's
+    rows = ["############", "#S.M.G.....#", "#.......#F.#", "#.C........#", "#X......#R.#", "############"]
+    pack, data = _explorable(tmp_path, cave=_tmj(rows, CAVE_OBJECTS, gates))
+    errors = MAPS.check_maps(pack.dir, data)
+    assert (errors == []) if needle is None else any(needle in e for e in errors), errors
+
+
+def test_a_law_gate_off_its_doorway_guards_nothing(tmp_path):
+    # the second gate moved into the room before its doorway: the third room opens after hall 1, not hall 2
+    law = json.loads((PACK_DIR / "maps/law.tmj").read_text(encoding="utf-8"))
+    gates = sorted((o for o in law["layers"][-1]["objects"] if o["type"] == "gate"), key=lambda o: o["x"])
+    gates[1]["x"] = 8 * TILE
+    data, _ = B.compile_pack(B.Pack("agentql"))
+    pack = tmp_path / "pack"
+    shutil.copytree(PACK_DIR, pack)
+    (pack / "maps/law.tmj").write_text(json.dumps(law), encoding="utf-8")
+    assert any(f"object {gates[1]['id']} (gate): guards nothing" in e for e in MAPS.check_maps(pack, data))
+
+
+# Two barrels: the player may roll either, both or neither (the engine agrees on each map).
+TWO_BARRELS = dict(CAVE_OBJECTS, A=("barrel", {"roll": "right"}), B=("barrel", {"roll": "right"}), c=("chest", {"loot": "gem"}))
+
+
+@pytest.mark.parametrize("rows,gates,guards", [
+    # A rolled alone opens a way round the gate; rolling B as well would block it
+    (["############", "#S.M.....G.#", "#X...B.#.C.#", "##.###A.####", "#......#...#", "#...F.R....#", "############"],
+     [("the_rune:compiler", [(2, 3)])], False),
+    # A rolled alone reaches the chest only through the gate; rolling B as well would open a way round
+    (["############", "#S.M.G.C.F.#", "#X.........#", "#...B.#.R..#", "##.##A.#####", "#.....######", "#.c.########", "############"],
+     [("the_rune:merchant", [(4, 5)]), ("the_rune:reward", [(2, 4)])], True),
+])
+def test_every_set_of_barrel_rolls_is_tried(tmp_path, rows, gates, guards):
+    pack, data = _explorable(tmp_path, cave=_tmj(rows, TWO_BARRELS, gates))
+    (pack.dir / "tiles/tiles.json").write_text(json.dumps({"items": FUN_ITEMS, "npcs": FUN_NPCS}), encoding="utf-8")
+    errors = MAPS.check_maps(pack.dir, data)
+    assert any("guards nothing" in e for e in errors) != guards, errors
+
+
+def test_a_hoard_under_a_rolled_barrel_still_blocks(tmp_path):
+    # the barrel's way round, with a hoard under the barrel: rolled, it leaves the hoard, which is solid
+    m = _tmj(_rows((8, 1, "b"), (8, 2, "."), (10, 3, ".")), dict(CAVE_OBJECTS, b=("barrel", {"roll": "down"})), CAVE_GATE)
+    m = _with_objects(m, [("hoard", 8, 1, {"loot": "gem"})])
+    pack, data = _explorable(tmp_path, cave=m)
+    (pack.dir / "tiles/tiles.json").write_text(json.dumps({"items": FUN_ITEMS, "npcs": FUN_NPCS}), encoding="utf-8")
+    errors = MAPS.check_maps(pack.dir, data)
+    assert not any("guards nothing" in e for e in errors), errors
+
+
+ENGINE_RESIZE = r"""
+const fs = require("fs"); globalThis.Quest = {};
+let now = 0, queued = null, drawn = 0;
+globalThis.performance = { now: () => now };
+globalThis.requestAnimationFrame = f => { queued = f; };
+const ctx = new Proxy({}, { get: (t, k) => (k === "drawImage" ? () => { drawn++; } : k in t ? t[k] : () => {}), set: (t, k, v) => { t[k] = v; return true; } });
+const canvas = { getContext: () => ctx, width: 0, height: 0 };
+globalThis.document = { createElement: () => canvas };
+eval(fs.readFileSync(process.argv[1], "utf8"));
+const game = Quest.engine.create({ parent: { appendChild() {} }, width: 320, height: 128, background: "#000", atlas: {}, columns: 12,
+                                   keyTarget: { addEventListener() {} } });
+let api;
+game.start(a => { api = a; a.addLayer({ name: "floor", width: 40, height: 14, data: new Array(560).fill(1) });
+                  const p = a.addPlayer(600, 200); a.cameras.main.setBounds(0, 0, 640, 224); a.cameras.main.startFollow(p, true, 1); return {}; });
+const step = () => { now += 1000 / 60; const f = queued; queued = null; f && f(); };
+step(); step();
+const before = { x: api.cameras.main.x, drawn };
+drawn = 0;
+game.resize(640, 224);
+const atResize = drawn;
+drawn = 0; step();
+console.log(JSON.stringify({ before: before.x, canvas: [canvas.width, canvas.height], camera: [api.cameras.main.w, api.cameras.main.h, api.cameras.main.x, api.cameras.main.y], atResize, frame: drawn }));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_the_view_can_grow_to_the_whole_map():
+    r = subprocess.run(["node", "-e", ENGINE_RESIZE, str(B.EXPLORE_DIR / "engine.js")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    got = json.loads(r.stdout)
+    assert got["before"] > 0                                     # 20x8 of a 40x14 map: the camera followed
+    assert got["canvas"] == [640, 224] and got["camera"] == [640, 224, 0, 0]
+    assert got["atResize"] >= 560 and got["frame"] >= 560        # every tile drawn, at once and after

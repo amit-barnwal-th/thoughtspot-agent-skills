@@ -1,7 +1,9 @@
 """Smoke-play the explore page in a real headless Chrome: build the site into a temporary folder,
 serve it, open explore/#smoke=<realm> and read the page's log. The run must show the realm locked
 for a fresh player (when the pack's unlock rule asks it), load its map, talk to every step's object
-in order with the gate shut until its steps are done, and save the realm as finished.
+in order with each gate drawn and solid exactly until its own steps are done (and pushed against
+as soon as it can be reached), the decree of a realm of halls shown, kept by Esc and shown again, and
+the realm saved as finished.
 
 pytest runs it wherever Chrome is installed (GitHub's ubuntu-latest has it; CI fails without it).
 Playwright may take it over later (design §5).
@@ -57,17 +59,27 @@ def check(realm: str, log: list[str], data: dict) -> list[str]:
     steps, saved = smoke[len(f"SMOKE {realm} "):].split(" | ")
     want = [f"hall:{h['id']}" for h in r["halls"]] + [f"{e['id']}:{x}" for e in r["encounters"]
                                                        for x in ("merchant", "guide", "compiler", "foe", "reward")]
-    got = [s.replace("[gate-shut]", "") for s in steps.split()]
+    got = [re.sub(r"\[gates:[01x]*\]$", "", s) for s in steps.split()]
     if got != want:
         problems.append(f"steps {got} != {want}")
-    # A gate is shut exactly while a step it requires is still ahead.
+    # Each gate is shut exactly while a step it requires is still ahead (the page logs them in map order).
     tmj = json.loads((B.PACKS / data["pack"]["id"] / "maps" / f"{realm}.tmj").read_text(encoding="utf-8"))
     needs = [str(next((p["value"] for p in o.get("properties", []) if p["name"] == "requires"), "")).split(",")
              for layer in tmj["layers"] if layer["type"] == "objectgroup" for o in layer["objects"] if o["type"] == "gate"]
     for i, s in enumerate(steps.split()):
-        shut = any(any(n.strip() in want[i:] for n in req) for req in needs)
-        if s.endswith("[gate-shut]") != shut:
-            problems.append(f"at {want[i] if i < len(want) else s} the gate is {'shut' if s.endswith('[gate-shut]') else 'open'}")
+        m = re.search(r"\[gates:([01x]*)\]$", s)
+        seen = m.group(1) if m else ""
+        if len(seen) != len(needs):
+            problems.append(f"at {want[i] if i < len(want) else s} the page logged {len(seen)} gates, the map has {len(needs)}")
+            continue
+        for g, req in enumerate(needs):
+            shut = any(n.strip() in want[i:] for n in req)
+            if seen[g] == "x":
+                problems.append(f"at {want[i] if i < len(want) else s} gate {g + 1} is drawn but not solid, or solid but not drawn")
+            elif (seen[g] == "1") != shut:
+                problems.append(f"at {want[i] if i < len(want) else s} gate {g + 1} is {'shut' if seen[g] == '1' else 'open'}")
+    if r["halls"] and f"DECREE {realm}" not in log:
+        problems.append(f"the decree of {realm} wasn't shown, kept by Esc and shown again")
     if not (json.loads(saved) or {}).get("done"):
         problems.append(f"{realm} was not saved as finished")
     if f"EXIT {realm}" not in log:
