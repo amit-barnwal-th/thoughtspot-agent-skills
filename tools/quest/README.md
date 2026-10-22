@@ -181,6 +181,43 @@ that supports 2020-12 (4.0 or later) is installed, and skips otherwise.
 So a question is edited in the pack's `content.yaml`, never in a front end, and a second front
 end (for example an explorable map) plays the same content by loading `quest.json`.
 
+## Maps for the explore front end
+
+A pack whose `explore.realms` lists realms has a Tiled map for each, plus an overworld:
+`maps/overworld.tmj` and `maps/<realm id>.tmj`, saved by Tiled 1.10 or later as JSON (CSV tile
+data). `maps.py` checks them in the build (design §4.2), and refuses anything Phaser 4 or the
+explore page would read differently from the check:
+
+- **Shape:** orthogonal and finite; layers at the top level, unoffset: tile layers `floor` and
+  `walls` (the map's size) and one object layer `objects`; one embedded tileset named `tiles`
+  whose `.png` is in the pack; 16px tiles; objects are unrotated rectangles (not tile objects or
+  points), each exactly one tile on the grid (snap to grid in Tiled), because the explore page
+  gives each a 16px body at its centre; a wall, or someone solid, all round the edge, because the
+  page doesn't stop the player at the map's edge.
+- **Collision** is the `walls` layer: any non-empty tile blocks.
+- **Objects** have a `type` and string properties only:
+  - `spawn`, where the player appears (one per map);
+  - `portal to=<realm id>`, overworld only, one per realm;
+  - `exit`, realm maps only, one per map;
+  - `merchant`, `guide`, `compiler`, `foe`, `reward` with `encounter=<encounter id>`;
+  - `throne hall=<hall id>`;
+  - `gate requires=<step id>,…`.
+- **Steps:** a step id is `<encounter id>:<merchant|guide|compiler|foe|reward>` or
+  `hall:<hall id>`. Every step of a realm has exactly one object on its map.
+- **Reachability, in the game's order:** the game plays a realm's steps in one order (halls, then
+  each encounter's merchant, guide, compiler, foe, reward). Before each step, a flood-fill from the
+  spawn, with only the gates whose required steps are all **done** open, must reach that step's
+  object; the exit must be reachable from the start. A gate that only opens after a step behind it,
+  or a first step behind a gate, fails. Objects are solid; reaching one means standing on a
+  walkable tile next to it.
+- **No Tiled templates,** which Phaser doesn't resolve.
+
+`Quest.machine` accepts `interact {step}` only for the step the current screen waits on
+(`expected(state)`), and changes nothing on it, so walking to the foe first does nothing.
+`tests/play_map.js` plays a realm's steps through the machine with no canvas: every step is
+finished, every out-of-order interaction is refused, and a test pins that the machine asks for the
+steps in exactly the order `maps.py` walks.
+
 ## When the build fails
 
 `build.py` refuses to build when the pack no longer holds together, or no longer matches its
@@ -200,6 +237,7 @@ sources:
 | `strings.yaml: the classic page needs '…'` or `art/classic/….txt: the classic page needs it` | the page reads a string or art piece the pack lacks | add it to the pack |
 | `art/classic/….txt: not used` | an art file the page never reads, or a scene for a realm that doesn't exist or has halls (a realm of halls shows its crown) | remove it, or fix its name |
 | `strings.yaml: '…' is not used by the page, the engine or a plugin` | a string nothing reads (often a typo, or one a plugin reads without listing it in `STRINGS`) | remove it, or list it in the plugin's `STRINGS` |
+| `maps/….tmj: …` (for example `can't be reached when the game waits on …`, `must be exactly one tile on the grid`, `the map's edge must all be wall`, `step … needs exactly one object`, `is external; embed it`) | a map doesn't bind to the content, or something on it can't be reached | fix the map in Tiled; the message names the object |
 | `realm …: the classic page plays either halls or one encounter per realm` | a realm with halls and an encounter, or two encounters | split it into realms |
 | `pack.yaml: …` (for example `unknown key`, `unlock must be one of`, `pane …: label '…' is not in strings.yaml`, `pane id '…' is also a content key`) | the manifest is malformed | fix `pack.yaml`; the message names the rule |
 | `packs … and … share storage_key '…'` (or `id`, `publish_path`) | two games would overwrite each other's saves or Pages folder | give each pack its own |
