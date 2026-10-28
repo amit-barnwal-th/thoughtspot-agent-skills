@@ -275,7 +275,7 @@ are roughly ordered by value÷effort.
 | BL-421 | Eight validators fail open on bad input: an empty `--file ""` falls through to another mode (`check_tml`, `check_sv_yaml`), and a missing own input prints "Nothing to check" and exits 0 (converter parity, coverage matrix, mapping/code sync, runtime coverage, skill naming, internal imports) | 2026-11-30 |
 | BL-426 | Spec C5: number collisions — CHANGELOG fragments folded by a maintainer step, backlog ids unique at PR open (`BL-<pr>.<n>`), `check_backlog_integrity` Rule 2 scope widened to `docs/`/CHANGELOG/CLAUDE.md/`.claude/`, and a the rebump script for ts-cli version collisions | 2026-12-15 |
 | BL-427 | Spec C3 remainder: every gate proven to fire (extend `test_known_bad_fixtures.py` to all gates CI runs, with a meta-check), ratchets compared by value against base instead of by key, and a warning when a PR changes a gate and product code together | 2026-12-31 |
-| BL-429 | Spec C7 remainder: a new CONTRIBUTING.md under .github/, a design-issue template (new skill, new runtime dependency, rule exception), and the step-9 re-measure against the baseline at the window's end (90 days or 15 external PRs); the backtest waits for BL-416 | 2027-01-31 |
+| BL-429 | Spec C7 remainder (the contributor guide is `.github/CONTRIBUTING.md`): a design-issue template (new skill, new runtime dependency, rule exception), and the step-9 re-measure against the baseline at the window's end (90 days or 15 external PRs); the backtest waits for BL-416 | 2027-01-31 |
 | BL-430 | The pr-reviewer scratch-copy recipe leaves the copy's `origin` pointing at the source work tree with `GIT_ALLOW_PROTOCOL=file`, so branch code run there can push refs into the repo under review; set `remote set-url --push origin no-push` | 2026-11-30 |
 | BL-431 | An unowned `conftest.py` (root or `tools/`) or root pytest config can deselect the tests that pin the gates (proven: a 2-line a conftest.py under tools/ made `test_known_bad_fixtures.py` collect nothing); own them in CODEOWNERS and name them in pr-reviewer's gate-edits list | 2026-11-30 |
 
@@ -351,6 +351,8 @@ are roughly ordered by value÷effort.
 | BL-433 | pr-reviewer recipe test leaks a clone per run on macOS: `/usr/bin/mktemp -d` ignores `TMPDIR`, so `test_scratch_copy_recipe_copies_the_head_and_stubs_gh` leaves a directory in the system temp dir on every pre-commit with staged `.py` files | 2026-11-30 |
 | BL-434 | pr-ready docs say a `--post` run replaces the evidence block, but any `pr-ready.sh` invocation does (the placeholder is written before argument parsing), so `--help` or a typo also discards a reviewed block | 2026-11-30 |
 | BL-435 | The CODEOWNERS coverage test (`_owned()` in `test_pr_reviewer_brief.py`) treats a path as owned if any rule matches, while GitHub applies the last matching rule, so a future owner-less override line would still read as owned | 2026-12-31 |
+| BL-437 | `CHECKS_PYTHON` polish from the pr-reviewer's last pass on the contributor-guide branch: a quoted `~/…` interpreter path in the skill's Step 1 is not expanded (fails closed, confusing message); an unexported shell `CHECKS_PYTHON` counts as set; remedies print `"$CHECKS_PYTHON"`, empty in a terminal that lacks it; the unset PATH search still trusts an exit status (document as an accepted gap); Step 2 on a non-zero exit after the placeholder; per-validator `pip install X` remedies | 2026-11-30 |
+| ~~BL-436~~ | ~~`pr-ready` has no explicit interpreter override: `scripts/lib/python-bin.sh` takes the newest `python3.1x` with pytest anywhere on `PATH`, so a CI-equivalent virtual environment is bypassed by a newer system Python; and its failure messages (the `python3` fallback, the PyYAML and missing-module remedies) point only at `pip install`, never the virtual-environment route~~ | DONE (2026-10-29 — `CHECKS_PYTHON`, honoured before the search, fails closed) |
 
 ### Tier 4 — Deferred
 
@@ -15069,11 +15071,11 @@ lines (`~ Updating: ...`, the skill list) are printed before the prompt.
 
 **Target:** 2026-12-31.
 
-## BL-429 — spec C7 remainder — contributor guide, design-issue template, re-measure `Tier 2`
+## BL-429 — spec C7 remainder — design-issue template, re-measure `Tier 2`
 
 **Filed:** 2026-10-29. **Source:** `docs/superpowers/specs/2026-10-28-pr-quality-system-design.md` §5 C7 and §6 step 9; PR #680 shipped the PR-template fields and the baseline (`docs/reviews/2026-10-28-pr-metrics-baseline.md`).
 
-**Do.** Write a new CONTRIBUTING.md under .github/ (one page linking the rules); add an issue template for the three pre-approval cases (size only warns — see BL-420); at the end of the measurement window, re-run `tools/pr-metrics/collect.py` with defects attributed by introduction PR and date, compare with the baseline, and decide whether to move the review into CI. The backtest (spec C7, step 3) is blocked on BL-416.
+**Do.** (The contributor guide is `.github/CONTRIBUTING.md`, with the size guidance as a pointer to BL-420; it is not part of what remains.) Add an issue template for the three pre-approval cases (size only warns — see BL-420); at the end of the measurement window, re-run `tools/pr-metrics/collect.py` with defects attributed by introduction PR and date, compare with the baseline, and decide whether to move the review into CI. The backtest (spec C7, step 3) is blocked on BL-416.
 
 **Target:** 2027-01-31.
 
@@ -15130,3 +15132,32 @@ lines (`~ Updating: ...`, the skill list) are printed before the prompt.
 **Do.** Evaluate CODEOWNERS with last-match-wins semantics in the test, and add a case with an owner-less override line.
 
 **Target:** 2026-12-31.
+
+## BL-436 — pr-ready has no interpreter override; its remedies ignore the virtual-environment route `Tier 3`
+
+**Filed:** 2026-10-29. **Source:** the `pr-reviewer` agent's review of the contributor-guide PR.
+
+**What.** `scripts/lib/python-bin.sh` (shared by `pre-commit.sh` and `pr-ready.sh`) tries `python3.14`, `python3.13`, `python3.12` … and takes the first name on `PATH` that imports pytest. A CI-equivalent virtual environment built on 3.12 and put first on `PATH` is therefore bypassed when a newer Python with pytest is anywhere on `PATH`: `pr-ready` then runs on an interpreter the user did not set up and points its install remedy at it. The fallback to bare `python3`, the "pip install pyyaml" message in `tools/validate/pr_ready.py` and the missing-module remedy all name `pip install`, which a uv- or Homebrew-managed Python refuses.
+
+**Do.** Add an explicit override (an environment variable naming the interpreter, honoured before the search) for the alias and the skill to set, and have the remedies mention the virtual-environment route in `.github/CONTRIBUTING.md`. Test that the override wins over a newer Python on `PATH`.
+
+**Target:** 2026-11-30.
+
+**Resolved 2026-10-29:** `scripts/lib/python-bin.sh` honours `CHECKS_PYTHON` before the newest-`python3.1x` search: a path (relative to the checkout root) or a command name on `PATH`, which must run as Python 3.10+ and import pytest. The probe must print a token: an exit-status probe accepted `true`, `:` or `echo`, after which pre-commit read every check's exit 0 as PASS (found by the `pr-reviewer` pass, fixed before merge). Anything else (missing, not executable, empty, older than 3.10, no pytest, not a Python) prints an error naming the variable and exits 2, pr-ready's "could not start"; it never falls back to the search. Unset, the selection is unchanged. `scripts/pr-ready.sh` writes the NOT READY placeholder before choosing the interpreter, so that stop leaves no earlier READY block. The bare-`python3` fallback warning, the PyYAML message and the missing-module remedy in `tools/validate/pr_ready.py` give the virtual-environment route (create it, install CI's lines with `uv pip install --python …` or the environment's own pip, set `CHECKS_PYTHON`), or install into `"$CHECKS_PYTHON"` when it is set, and point at `.github/CONTRIBUTING.md`; the guide's alias and the `pr-ready` skill's Step 1 set the variable. Tests: `tools/validate/tests/test_python_bin.py` (the real library under `set -euo pipefail`, stub interpreters that run the real probe, and `pr-ready.sh` in a throwaway checkout), remedy tests in `test_pr_ready.py`, and Step 1's choice in `test_pr_reviewer_brief.py`.
+
+## BL-437 — `CHECKS_PYTHON` polish `Tier 3`
+
+**Filed:** 2026-10-29. **Source:** the `pr-reviewer` agent's last pass on the contributor-guide branch (head 85c78cc2). All of these fail closed or only affect a message; none changes a verdict.
+
+**What.**
+- The skill's Step 1 fills `USER_PY="…"` in quotes, so a `~/…` path the user gives is not expanded and `scripts/lib/python-bin.sh` stops with "not an executable file" while showing a path that exists. A venv directory (rather than its interpreter) fails the same way.
+- Step 1's "already set" test (`${CHECKS_PYTHON+set}`) is true for an unexported shell variable, which the child process then does not see.
+- The install remedies in `tools/validate/pr_ready.py` print `"$CHECKS_PYTHON" -m pip install …`; the alias and the skill set the variable only for the run, so pasted into a terminal it expands to an empty command.
+- With `CHECKS_PYTHON` unset, the PATH search still trusts the exit status of `import pytest`; the header now explains why that is unsafe for the override. Planting an impostor requires write access to a PATH directory, so record it as an accepted gap in a comment, or reuse the token probe.
+- Skill Step 2 assumes a finished block on exit 1; an uncaught exception (or Ctrl-C) after the placeholder is written also exits non-zero.
+- Several validators' own remedies say a bare `pip install X` (`check_module_health.py`, `check_yaml.py`, `check_tml.py`, `check_sv_yaml.py`, `check_ci_gate_coverage.py`, `check_skill_flag_usage.py`), which installs into another interpreter under `CHECKS_PYTHON`.
+- The probe compares stdout to `ok` exactly; a Windows Python under Git Bash may print `ok\r`.
+
+**Do.** Expand a leading `~/` in Step 1 (and say "the interpreter's path"), `export CHECKS_PYTHON` on the set branch, print remedies with the value through `evidence.scrub`, add the accepted-gap comment (or the token probe) to the search loop, make Step 2 report stderr when the block is the placeholder, route validator remedies through one helper, and write the probe token without a newline. Tests for the tilde and unexported cases.
+
+**Target:** 2026-11-30.
