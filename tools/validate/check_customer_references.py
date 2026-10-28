@@ -70,6 +70,8 @@ Modes:
   --root . --range A..B   every commit in A..B: added lines and the commit message (CI, PRs).
                           Needs no secrets, so it also runs on fork PRs.
   --message-file PATH     one commit message; what the commit-msg hook runs
+  --text-file PATH        every line of one text file, with no commit-message scissors
+                          handling; the pr-ready skill's review text and evidence block
 
 Private name list (opt-in). The patterns above recognise LINKS; they cannot tell that a
 bare word is a customer's name. A maintainer can supply names that live OUTSIDE this repo:
@@ -887,20 +889,42 @@ def main(argv: Optional[list[str]] = None) -> int:
                       help="Scan the added lines and commit messages of every commit in A..B")
     mode.add_argument("--message-file", metavar="PATH",
                       help="Scan a commit message file (the commit-msg hook)")
+    mode.add_argument("--text-file", metavar="PATH",
+                      help="Scan every line of a text file; no commit-message handling")
     args = parser.parse_args(argv)
+    # An empty value used to read as "option absent" and fall through to the staged
+    # scan, a different mode from the one asked for. Refuse it, then test `is not None`.
+    for option, value in (("--range", args.range), ("--message-file", args.message_file),
+                          ("--text-file", args.text_file)):
+        if value == "":
+            parser.error(f"{option} needs a value")
     repo_root = Path(args.root).resolve()
     denylist = load_denylist()
 
     findings: list[tuple[str, Hit]] = []
     try:
-        if args.message_file:
+        if args.text_file is not None:
+            # Every line, as written: unlike --message-file there is no scissors cut-off,
+            # so planted text cannot hide what follows it (the reason check-pr.sh calls
+            # the scanner directly). For text that is not a commit message, such as the
+            # pr-ready skill's review text before it reaches a public PR.
+            try:
+                text = Path(args.text_file).read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                print(f"FAIL  could not read the file to scan: {exc.strerror or exc}")
+                print("      Refusing to report PASS on unscanned text.")
+                return 1
+            findings = [(f"{Path(args.text_file).name}:{h.line}", h)
+                        for h in scan_text(text, "", denylist, grandfathered=set())]
+            scanned = Path(args.text_file).name
+        elif args.message_file is not None:
             text = commit_message_text(
                 Path(args.message_file).read_text(encoding="utf-8", errors="replace"),
                 git_config_get("core.commentChar", repo_root))
             findings = [(f"commit message:{h.line}", h)
                         for h in scan_text(text, "", denylist, grandfathered=set())]
             scanned = "the commit message"
-        elif args.range:
+        elif args.range is not None:
             findings = scan_range(repo_root, args.range, denylist)
             scanned = f"commits in {args.range}"
         elif args.all:

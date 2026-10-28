@@ -229,3 +229,60 @@ def test_check_secrets_flags_pem_header(tmp_path):
                    capture_output=True, check=True)
     res = _run([str(VALIDATE / "check_secrets.py"), "--root", str(tmp_path)])
     assert res.returncode != 0, res.stdout + res.stderr
+
+
+def test_check_secrets_file_mode_flags_a_jwt_outside_any_repo(tmp_path):
+    # --file scans one file with no git: the pr-ready skill's review text, which sits
+    # outside the work tree. The JWT is assembled at runtime so this test file does
+    # not trip check_secrets in pre-commit.
+    seg = "A" * 12
+    review = tmp_path / "review.md"
+    review.write_text(f"- `x.py:3` quotes {'eyJ' + seg}.{'eyJ' + seg}.{seg}\n")
+    res = _run([str(VALIDATE / "check_secrets.py"), "--file", str(review)])
+    assert res.returncode != 0, res.stdout + res.stderr
+    assert "JWT" in res.stdout
+
+    review.write_text("### Blocker\nNone.\n")
+    res = _run([str(VALIDATE / "check_secrets.py"), "--file", str(review)])
+    assert res.returncode == 0, res.stdout + res.stderr
+
+
+def test_check_secrets_file_mode_fails_on_an_unreadable_file(tmp_path):
+    res = _run([str(VALIDATE / "check_secrets.py"), "--file", str(tmp_path / "missing.md")])
+    assert res.returncode != 0 and "Refusing to report PASS" in res.stdout
+
+
+def test_check_secrets_file_mode_refuses_all(tmp_path):
+    # --file scans one file. Combined with --all it used to scan only that file and
+    # exit 0, silently dropping the --all scan; now it is a usage error.
+    review = tmp_path / "review.md"
+    review.write_text("### Blocker\nNone.\n")
+    for argv in (["--file", str(review), "--all"], ["--all", "--file", str(review)]):
+        res = _run([str(VALIDATE / "check_secrets.py"), *argv])
+        assert res.returncode == 2, res.stdout + res.stderr
+        assert "not allowed with argument" in res.stderr, res.stderr
+
+
+def test_check_secrets_file_mode_scans_a_file_whatever_its_suffix(tmp_path):
+    # The tree modes skip image/archive suffixes as noise. A file named on purpose is
+    # scanned anyway: skipping it would print "No secrets detected" for unread text.
+    seg = "A" * 12
+    named = tmp_path / "review.svg"
+    named.write_text(f"<text>{'eyJ' + seg}.{'eyJ' + seg}.{seg}</text>\n")
+    res = _run([str(VALIDATE / "check_secrets.py"), "--file", str(named)])
+    assert res.returncode != 0 and "JWT" in res.stdout, res.stdout + res.stderr
+
+
+def test_check_secrets_file_mode_refuses_an_empty_path(tmp_path):
+    # `--file ""` was falsy, so it fell through to the staged scan: a different mode
+    # from the one asked for. Run inside a repo with a staged key, where that
+    # fall-through would show as exit 1; a usage error is exit 2.
+    _init_git(tmp_path)
+    pem = "-----BEGIN " + "RSA PRIVATE KEY-----"
+    (tmp_path / "leak.py").write_text(f'key = """{pem}"""\n')
+    subprocess.run(["git", "-C", str(tmp_path), "add", "leak.py"],
+                   capture_output=True, check=True)
+    res = subprocess.run([sys.executable, str(VALIDATE / "check_secrets.py"), "--file", ""],
+                         capture_output=True, text=True, cwd=tmp_path)
+    assert res.returncode == 2, res.stdout + res.stderr
+    assert "--file needs a path" in res.stderr, res.stderr

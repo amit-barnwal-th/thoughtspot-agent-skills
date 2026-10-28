@@ -21,6 +21,14 @@ Usage:
     python tools/validate/check_secrets.py           # scan staged files (pre-commit mode)
     python tools/validate/check_secrets.py --all     # scan all tracked files (full repo)
     python tools/validate/check_secrets.py --root .
+    python tools/validate/check_secrets.py --file PATH   # one file, tracked or not
+
+`--file` runs content checks 2-6 on one file anywhere on disk, with no git involved,
+whatever the file's suffix. The `pr-ready` skill uses it on review text before that
+text is written into an evidence block or offered for pasting into a public PR: the
+review quotes code, pasted snippets and earlier reviewers' points, which others may
+have written, and nothing else scans it. An unreadable file is a FAIL, never an empty pass.
+`--file` with `--all`, or with an empty path, is a usage error (exit 2).
 """
 from __future__ import annotations
 
@@ -197,8 +205,8 @@ _SKIP_SUFFIXES = {
 }
 
 
-def _scan_file_content(path: Path, repo_root: Path) -> list[str]:
-    if path.suffix.lower() in _SKIP_SUFFIXES:
+def _scan_file_content(path: Path, repo_root: Path, *, skip_suffixes: bool = True) -> list[str]:
+    if skip_suffixes and path.suffix.lower() in _SKIP_SUFFIXES:
         return []
 
     try:
@@ -257,6 +265,29 @@ def _scan_file_content(path: Path, repo_root: Path) -> list[str]:
     return hits
 
 
+def _scan_one_file(path: Path) -> int:
+    """`--file`: content checks on one file. Read it first so an unreadable file
+    fails, rather than reaching _scan_file_content's empty-on-OSError path. Scanned
+    whatever its suffix: the tree modes skip images and archives as noise, but a
+    file named on purpose that was skipped would still print "No secrets detected"."""
+    path = path.resolve()
+    try:
+        path.read_bytes()
+    except OSError as exc:
+        print(f"FAIL  could not read {path.name}: {exc.strerror or exc}")
+        print("      Refusing to report PASS on an unscanned file.")
+        return 1
+    hits = _scan_file_content(path, path.parent, skip_suffixes=False)
+    for msg in hits:
+        print(f"FAIL  {msg}")
+    print()
+    if hits:
+        print(f"{len(hits)} potential secret(s) found in {path.name}.")
+        return 1
+    print(f"No secrets detected in {path.name}.")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -264,11 +295,27 @@ def _scan_file_content(path: Path, repo_root: Path) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Scan for accidental credential exposure.")
     parser.add_argument("--root", default=".", help="Repo root (default: current dir)")
-    parser.add_argument(
+    # One mode per run. `--file` with `--all` used to scan only the one file and exit
+    # 0, silently dropping the `--all` scan the caller asked for; argparse now refuses
+    # the pair.
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--all", action="store_true",
         help="Scan all tracked files (default: staged files only)",
     )
+    modes.add_argument(
+        "--file", metavar="PATH",
+        help="Scan one file's content (checks 2-6), tracked or not; no git involved "
+             "(--root does not apply)",
+    )
     args = parser.parse_args()
+
+    # `is not None`, not truthiness: `--file ""` used to read as "no --file" and fall
+    # through to the staged scan, a different mode from the one asked for.
+    if args.file is not None:
+        if not args.file:
+            parser.error("--file needs a path")
+        return _scan_one_file(Path(args.file))
 
     repo_root = Path(args.root).resolve()
 

@@ -47,7 +47,10 @@ nothing more.
 
 **Never fails because apache/ossie is absent.** The upstream doc is in another
 repository that most checkouts will not have. Without it this exits 0 and says
-so, rather than turning "you have not cloned ossie" into a failed commit.
+so, rather than turning "you have not cloned ossie" into a failed commit. The
+line it prints starts with `SKIP`, so `run_checks.py` reports SKIP rather than
+PASS; locally the runner reports NOT RUN before getting this far, using this
+file's own `find_upstream`.
 """
 from __future__ import annotations
 
@@ -141,13 +144,18 @@ def main() -> int:
     repo_root = Path(args.root).resolve()
     ours_path = repo_root / OURS
     if not ours_path.is_file():
-        print(f"  {OURS} not found; nothing to compare.")
-        return 0
+        # OURS is part of this repo, so its absence is a broken tree or a wrong
+        # --root -- unlike the upstream checkout, never an optional prerequisite.
+        print(f"FAIL  ossie mapping sync: {OURS} not found under {repo_root}; "
+              f"it is this repo's own mapping doc (wrong --root?).")
+        return 1
 
     upstream_path = find_upstream(args.ossie_root)
     if upstream_path is None:
-        print("  apache/ossie checkout not found, so the shipped converter's mapping "
-              "could not be read.\n"
+        # The leading `SKIP` is load-bearing: run_checks.classify() reads it as
+        # "compared nothing". Exiting 0 without it would report PASS.
+        print("SKIP  ossie mapping sync: apache/ossie checkout not found, so the "
+              "shipped converter's mapping could not be read.\n"
               "  Pass --ossie-root <path> or set OSSIE_ROOT to compare. Skipping.")
         return 0
 

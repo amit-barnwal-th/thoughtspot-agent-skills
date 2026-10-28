@@ -5,7 +5,9 @@ actual quality infrastructure.
 
 Sources of truth (never manually maintained — always scraped):
   1. scripts/pre-commit.sh — what runs locally, trigger conditions, inline comments
-  2. .github/workflows/validate.yml — what runs in CI
+  2. .github/workflows/validate.yml — what runs in CI. Its full-repo step is one
+     `run_checks.py --context ci` call, which this expands from
+     tools/validate/checks.py (CHECKS) — the list CI actually runs
   3. Validator docstrings — what each check does
   4. git log — when each validator was last modified / last had a meaningful change
 
@@ -25,6 +27,16 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from checks import CHECKS  # noqa: E402
+
+#: CI's full-repo step and smoke step call the runner rather than listing scripts
+#: (2026-10-28). Exact lines: `_parse_ci` expands the first into `checks.CHECKS`
+#: and must not guess what any other spelling would run.
+RUNNER_CI_CALL = "python3 tools/validate/run_checks.py --context ci --base origin/main"
+RUNNER_SMOKES_CALL = "python3 tools/validate/run_checks.py --smokes"
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +194,19 @@ def _find_trigger(lines: list[str], check_line: int) -> str:
 # CI workflow parser
 # ---------------------------------------------------------------------------
 
+def _runner_entries() -> list[dict]:
+    """One entry per `checks.CHECKS` item: what CI's runner line actually runs.
+
+    Mode follows `Check.hard` (a soft check never fails the step). As with the
+    explicit-line form, the mode only decides the row for a CI-only validator;
+    one that also runs in pre-commit keeps its pre-commit mode.
+    """
+    return [
+        {"validator": c.script, "comment": "", "mode": "gate" if c.hard else "soft"}
+        for c in CHECKS
+    ]
+
+
 def _parse_ci(path: Path) -> list[dict]:
     """Extract validators from the CI workflow YAML."""
     if not path.exists():
@@ -192,6 +217,22 @@ def _parse_ci(path: Path) -> list[dict]:
 
     for line in text.splitlines():
         stripped = line.strip()
+
+        # The runner reads checks.CHECKS, so the catalog does too. The smoke call
+        # is not a row: the smoke suites are not validators, and before the runner
+        # the loop that ran them produced none either. Any other spelling raises —
+        # expanding `--only x` or `|| true` to the whole list would claim gates CI
+        # does not enforce.
+        if stripped == RUNNER_CI_CALL:
+            entries.extend(_runner_entries())
+            continue
+        if stripped == RUNNER_SMOKES_CALL:
+            continue
+        if "tools/validate/run_checks.py" in stripped and not stripped.startswith("#"):
+            raise ValueError(
+                f"unrecognised run_checks.py call in {path.name}: {stripped!r}; "
+                f"expected {RUNNER_CI_CALL!r} or {RUNNER_SMOKES_CALL!r}"
+            )
 
         # python3 tools/validate/check_*.py lines
         if stripped.startswith("python3 tools/validate/"):
@@ -285,11 +326,12 @@ def _last_modified(path: Path, repo_root: Path) -> str:
 # Generator
 # ---------------------------------------------------------------------------
 
-def generate_catalog(repo_root: Path) -> str:
-    """Generate the quality gates catalog."""
+def collect_gates(repo_root: Path) -> dict[str, dict]:
+    """Every gate the catalog lists, keyed by validator (or a synthetic key), with
+    where it runs, its trigger, comment and mode. `generate_catalog` renders this;
+    tests read it directly to compare two catalogs by (validator, mode)."""
     precommit_path = repo_root / "scripts" / "pre-commit.sh"
     ci_path = repo_root / ".github" / "workflows" / "validate.yml"
-    validate_dir = repo_root / "tools" / "validate"
 
     pc_entries = _parse_precommit(precommit_path)
     ci_entries = _parse_ci(ci_path)
@@ -349,6 +391,14 @@ def generate_catalog(repo_root: Path) -> str:
                 "mode": entry.get("mode", "gate"),
             }
 
+    return all_validators
+
+
+def generate_catalog(repo_root: Path) -> str:
+    """Generate the quality gates catalog."""
+    validate_dir = repo_root / "tools" / "validate"
+    all_validators = collect_gates(repo_root)
+
     # Enrich with docstrings and git dates
     for v, info in all_validators.items():
         vpath = validate_dir / v if v.endswith(".py") else None
@@ -373,8 +423,9 @@ def generate_catalog(repo_root: Path) -> str:
         "- **Audit (angle 7):** review the Last Modified column to find gates that",
         "  haven't changed in 6+ months — are they still catching real issues, or",
         "  checking something that no longer happens?",
-        "- **Adding a gate:** add the validator, wire it into `pre-commit.sh` and/or",
-        "  `validate.yml`, then re-run this generator.",
+        "- **Adding a gate:** add the validator, list it in `tools/validate/checks.py`",
+        "  (CI runs that list) and/or wire it into `pre-commit.sh`, then re-run this",
+        "  generator.",
         "",
         "> **`Last modified` is a snapshot, not a gated value** (BL-192). It comes from",
         "> `git log` per validator, which made the whole document a function of repo",
