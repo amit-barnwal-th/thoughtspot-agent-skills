@@ -1398,3 +1398,58 @@ class TestSourceNamesCompareCaseInsensitively:
         assert "duplicate source names" in str(result.exception)
         assert sources.read_text() == before
 
+
+
+def test_update_metadata_keeps_new_table_block_appended_in_same_run(tmp_path):
+    """Audit 2026-10-29 17.1: a new table's schema.yml block and a metadata change
+    to an existing model in the SAME file, in one --update-metadata run. The metadata
+    pass used to re-read schema.yml from disk and overwrite the pending write that
+    carried the appended block, so the new model was lost while the output said
+    "appended" — and the next sync saw it as existing, so it never came back."""
+    model_path, export_dir = _write_export_fixtures(tmp_path)
+    proj = _write_existing_project(tmp_path)
+
+    result = _invoke_with("sync", model_path, export_dir, proj, "--update-metadata")
+    assert result.exit_code == 0, result.output
+
+    schema_doc = yaml.safe_load((proj / "models" / "schema.yml").read_text(encoding="utf-8"))
+    models = {m["name"]: m for m in schema_doc["models"]}
+    assert set(models) == {"stg_customers", "stg_orders"}
+    # the new block arrived whole (columns and their ts_* tags), not just its name
+    assert models["stg_orders"].get("columns"), models["stg_orders"]
+    # and the metadata pass still applied to the existing model in the same file
+    cust_meta = models["stg_customers"]["columns"][0]["config"]["meta"]
+    assert cust_meta.get("ts_synonym"), cust_meta
+
+
+def test_build_model_import_is_lint_gated(tmp_path, monkeypatch):
+    """PR A converter-audit P1: `ts dbt-export build-model --import` POSTed Model
+    TML with no lint, the sibling of audit 2026-10-29 finding 9.3."""
+    import ts_cli.io_helpers as io
+    import ts_cli.tml_lint as tl
+    calls = []
+    monkeypatch.setattr(io, "run_tml_import", lambda *a, **k: calls.append(a) or ("OK", "g", None))
+    monkeypatch.setattr(tl, "lint_tml", lambda doc: ["I14: something"])
+    schema = tmp_path / "schema.yml"
+    schema.write_text(yaml.safe_dump({"version": 2, "models": [{
+        "name": "stg_orders", "columns": [{"name": "AMOUNT", "config": {"meta": {
+            "ts_column_type": "measure", "ts_aggregation": "sum"}}}]}]}), encoding="utf-8")
+    result = runner.invoke(app, ["dbt-export", "build-model", "--schema-yml", str(schema),
+                                 "--model-name", "M", "--import", "--profile", "p"])
+    assert result.exit_code != 0
+    assert "LINT: I14" in result.output and "nothing was imported" in result.output
+    assert calls == []
+
+
+def test_pending_write_found_under_a_different_case(tmp_path):
+    """PR A review: models/Schema.yml on a case-insensitive filesystem."""
+    import os
+    from ts_cli.dbt.project_io import pending_or_disk
+    real = tmp_path / "Schema.yml"
+    real.write_text("disk", encoding="utf-8")
+    other = tmp_path / "schema.yml"
+    if not other.exists():
+        import pytest
+        pytest.skip("case-sensitive filesystem")
+    assert os.path.samefile(real, other)
+    assert pending_or_disk({other: "queued"}, real) == "queued"

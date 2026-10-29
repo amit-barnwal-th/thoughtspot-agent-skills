@@ -448,7 +448,7 @@ Core ≤1.7-era projects may still use a bare `meta:` sibling instead, see below
 | Tag | Sets | Valid values |
 |---|---|---|
 | `ts_column_type` | Column type | `attribute` or `measure` |
-| `ts_aggregation` | Default aggregation | `sum`, `count`, `count_distinct`, `min`, `max`, `average`, `std_deviation`, `variance`, `none` |
+| `ts_aggregation` | Default aggregation | `sum`, `count`, `count_distinct`, `min`, `max`, `average`, `std_deviation`, `variance`, `none`. `count_distinct` on a physical measure imports as a `COUNT_DISTINCT` column, which works on a numeric column but silently becomes an attribute on a text or date one (invariant I5); the lint gate reports it as advisory until the conversion lands (BL-447). For a text or date key, write a `ts_formula` with `unique count ( [T::col] )` and `ts_column_type: measure` instead (a formula column defaults to attribute) |
 | `ts_synonym` | Search synonyms | Comma-separated text, or a YAML list when a synonym itself contains a comma (`ts-convert-to-dbt` writes the list form then) |
 | `ts_format_pattern` | Numeric/date display format | Format pattern strings |
 | `ts_hidden` | Column visibility | `yes`/`no` (default `no`) |
@@ -1115,4 +1115,5 @@ object itself.
 
 | Version | Date | Summary |
 |---|---|---|
+| 1.1.0 | 2026-10-29 | Requires ts-cli 0.187.0. `ts dbt build-model` and `ts dbt-export build-model --import` lint the Model TML before importing it (I5 advisory); `ts dbt build-model` applies `ts_rls_rules` before the Model import — for every Table the Model joins, including join targets outside `--model-path` — and stops (non-zero) if any Table's rules did not apply (audit 2026-10-29: 9.3, 17.2). |
 | 1.0.0 | 2026-09-10 | Initial release — dbt (Cloud or Core) → ThoughtSpot Tables + Model, first import and resync. Path N (server-side `generate-tml`) and Path Y (`ts dbt build-model`, for `ts_join_*` graphs, `ts_rls_rules` and MetricFlow metrics), with `ts dbt list-models` / `ts dbt inspect` choosing between them. |

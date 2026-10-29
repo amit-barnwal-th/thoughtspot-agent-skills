@@ -3976,6 +3976,15 @@ on a name identifier.
 `ts_column_type` → `column_type`, `ts_aggregation` → `aggregation`, `ts_synonym` → `synonyms`,
 `ts_format_pattern` → `format_pattern`, `ts_index_type` → `index_type`, `ts_ai_context` → `ai_context`.
 
+**Gates before the Model import.** The Model TML is linted (the single-document model invariants
+`ts tml lint` checks on a Model file alone; `ts dbt-export build-model --import` runs the same gate,
+after writing any `--output`/`--rls-out` files). I5 (`COUNT_DISTINCT` on a physical measure) is
+reported as advisory, not blocking. `ts_rls_rules` are applied to their Tables **before** the Model
+import, for every Table the Model joins, including join targets outside `--model-path`; a lint
+finding, or a Table whose rules did not apply, stops `ts dbt build-model` with a non-zero exit
+before the Model is imported. (`ts dbt-export build-model --import` does not apply rules yet: it
+warns, as before.)
+
 **Note:** `description` and `ts_ai_context` are populated from the compiled manifest. If absent in
 the imported Model, trigger a new dbt Cloud job run to compile the latest schema.yml changes, then
 re-run `ts dbt build-model`.

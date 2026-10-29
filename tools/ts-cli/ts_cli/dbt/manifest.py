@@ -31,7 +31,8 @@ from .tags import (
     tml_properties_from_ts_meta,
 )
 
-def extract_model_rls_from_manifest(manifest: dict, model_path: str) -> dict[str, dict]:
+def extract_model_rls_from_manifest(manifest: dict, model_path: str,
+                                    table_names: "set[str] | None" = None) -> dict[str, dict]:
     """Extract ts_rls_rules from compiled manifest model nodes.
 
     Parallel to extract_table_rls_from_schema_yml but reads from a compiled
@@ -40,17 +41,29 @@ def extract_model_rls_from_manifest(manifest: dict, model_path: str) -> dict[str
     this returns the same data as the schema.yml reader without needing the
     source file.
 
-    Returns {TABLE_NAME_UPPER: rls_rules_block} for each model in model_path
-    that carries ts_rls_rules under config.meta.  The caller should export the
+    Returns {TABLE_NAME_UPPER: rls_rules_block} for each model in model_path —
+    and, when ``table_names`` is given, each *model* node whose Table is in it (a
+    join target outside model_path) — that carries ts_rls_rules under config.meta.
+    A model in model_path always wins over an out-of-path node with the same Table
+    name (audit 2026-10-29, 17.2 review).  The caller should export the
     current Table TML, merge in the rls_rules block, and re-import.
     """
     result: dict[str, dict] = {}
-    for node in manifest.get("nodes", {}).values():
-        # Exact dirname, matching inspect.py's rls_models. This was a substring
+    nodes = list(manifest.get("nodes", {}).values())
+    # Every in-path model's Table, with or without rules: an out-of-path node with
+    # the same Table name never contributes rules, whatever the manifest order.
+    in_path_tables = {_node_table_name(n) for n in nodes if model_in_path(n, model_path)}
+    for node in nodes:
+        # Exact dirname for the in-path set (inspect.py's rls_models reports only
+        # that set; out-of-path join targets are BL-495). This was a substring
         # match, which also swept in a sibling directory sharing the prefix
         # (`models/staging` picking up `models/staging_archive`) and disagreed
         # with what `ts dbt inspect` reported for the same path.
-        if not model_in_path(node, model_path):
+        in_path = model_in_path(node, model_path)
+        table = _node_table_name(node)
+        if not in_path and not (node.get("resource_type") == "model"
+                                and table in (table_names or ())
+                                and table not in in_path_tables):
             continue
         model_name = node.get("name")
         if not model_name:
@@ -62,7 +75,7 @@ def extract_model_rls_from_manifest(manifest: dict, model_path: str) -> dict[str
 
         # Malformed hand-written rules raise SystemExit naming the model
         # (PR #506 review) — see model_from_schema_yml.rls_rules_block.
-        result[_node_table_name(node)] = rls_rules_block(model_name, ts_rls)
+        result[table] = rls_rules_block(model_name, ts_rls)
 
     return result
 def manifest_table_locations(manifest: dict) -> dict[str, dict]:

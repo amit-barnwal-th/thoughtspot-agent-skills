@@ -34,7 +34,7 @@ from ts_cli.dbt.case_b_plan import (
     _kept_ts_keys,  # noqa: F401 -- re-exported for tests
     render_report_markdown,
 )
-from ts_cli.dbt.project_io import commit_writes, property_files
+from ts_cli.dbt.project_io import commit_writes, pending_or_disk, property_files
 from ts_cli.io_helpers import load_json_file
 
 app = typer.Typer(help="ThoughtSpot Model TML -> dbt project scaffold (offline file transform).")
@@ -640,7 +640,11 @@ def _update_existing_schema_models(
     model_to_file: dict[str, Path] = {}
     for yml_path in property_files(models_dir):
         try:
-            doc = yaml.safe_load(yml_path.read_text(encoding="utf-8"))
+            # Start from a write an earlier pass in this run already queued for
+            # the file (e.g. new models appended to schema.yml), not from disk —
+            # re-reading disk here overwrote that write and lost the new blocks
+            # (audit 2026-10-29, 17.1).
+            doc = yaml.safe_load(pending_or_disk(writes, yml_path))
         except Exception:
             continue
         if not isinstance(doc, dict):
@@ -913,6 +917,8 @@ def build_model_cmd(
         typer.echo(f"  Model TML written to {output}", err=True)
 
     if do_import:
+        from ts_cli.dbt.import_gate import lint_gate
+        lint_gate(tml)
         _import_model_tml(tml, profile, model_guid, model_name)
     elif not output:
         print(result)

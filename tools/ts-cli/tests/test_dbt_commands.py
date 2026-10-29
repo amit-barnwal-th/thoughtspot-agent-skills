@@ -1399,3 +1399,145 @@ def test_no_archive_adds_no_file_field():
     form = {}
     _attach_zip(form, None)
     assert form == {}
+
+
+class TestApplyTableRls:
+    """Audit 2026-10-29 17.2: an RLS step that did not apply used to print a
+    warning and exit 0 with the Model live over Tables with no row-level security."""
+
+    _RLS = {"STG_BARBERS": {"rules": [{"name": "r", "expr": "ts_username = [STG_BARBERS::FIRST_NAME]"}]}}
+
+    class _Client:
+        def __init__(self, export_items, import_items):
+            self.export_items, self.import_items, self.calls = export_items, import_items, []
+
+        def post(self, path, **kw):
+            self.calls.append(path)
+            return _FakeResp(self.export_items if path.endswith("/tml/export") else self.import_items)
+
+    _GOOD_EXPORT = [{"info": {"name": "STG_BARBERS", "status": {"status_code": "OK"}},
+                     "edoc": "{\"table\": {\"name\": \"STG_BARBERS\"}}"}]
+
+    def test_all_applied_returns_empty(self):
+        c = self._Client(self._GOOD_EXPORT, [{"response": {"status": {"status_code": "OK"}}}])
+        assert dbt_mod._apply_table_rls(c, self._RLS, {}) == []
+        assert c.calls[-1].endswith("/tml/import")
+
+    def test_export_without_edoc_is_reported_not_skipped(self):
+        c = self._Client([{"info": {"name": "STG_BARBERS", "status": {"status_code": "ERROR",
+                                    "error_message": "FORBIDDEN"}}, "edoc": None}], [])
+        out = dbt_mod._apply_table_rls(c, self._RLS, {})
+        assert len(out) == 1 and "STG_BARBERS" in out[0] and "FORBIDDEN" in out[0]
+        assert not any(p.endswith("/tml/import") for p in c.calls)
+
+    def test_import_error_is_reported(self):
+        c = self._Client(self._GOOD_EXPORT, [{"response": {"status": {"status_code": "ERROR",
+                                                                      "error_message": "bad expr"}}}])
+        out = dbt_mod._apply_table_rls(c, self._RLS, {})
+        assert len(out) == 1 and "bad expr" in out[0]
+
+    def test_empty_import_response_is_reported(self):
+        c = self._Client(self._GOOD_EXPORT, [])
+        assert dbt_mod._apply_table_rls(c, self._RLS, {})
+
+
+class TestBuildModelRlsGate:
+    _RUN = TestBuildModelFlags._RUN
+    _setup = TestBuildModelFlags._setup
+    _MANIFEST = TestBuildModelFlags._MANIFEST
+
+    def test_rls_failure_exits_nonzero_before_model_import(self, monkeypatch, tmp_path):
+        calls, _ = self._setup(monkeypatch, tmp_path)
+        import ts_cli.dbt_build_export as dbe
+        monkeypatch.setattr(dbe, "extract_model_rls_from_manifest",
+                            lambda *a, **k: {"STG_BARBERS": {"rules": []}})
+        monkeypatch.setattr(dbt_mod, "_apply_table_rls",
+                            lambda *a, **k: ["STG_BARBERS: the RLS import did not succeed (boom)"])
+        result = runner.invoke(app, ["dbt", "build-model", "--dbt-cloud-profile", "p",
+                                     "--model-path", "models/staging/barbershop", "--model-name", "M"])
+        assert result.exit_code != 0
+        assert "STG_BARBERS" in result.output and "boom" in result.output
+        assert not any(p.endswith("/tml/import") for p, _ in calls)
+
+    def test_lint_finding_exits_nonzero_before_any_write(self, monkeypatch, tmp_path):
+        """Audit 2026-10-29 9.3: build-model POSTed Model TML with no lint gate."""
+        calls, _ = self._setup(monkeypatch, tmp_path)
+        import ts_cli.tml_lint as tl
+        monkeypatch.setattr(tl, "lint_tml", lambda doc: ["I13: dangling [formula_X] reference"])
+        result = runner.invoke(app, ["dbt", "build-model", "--dbt-cloud-profile", "p",
+                                     "--model-path", "models/staging/barbershop", "--model-name", "M"])
+        assert result.exit_code != 0
+        assert "LINT: I13" in result.output and "nothing was imported" in result.output
+        assert not any(p.endswith("/tml/import") or p.endswith("/tml/export") for p, _ in calls)
+
+
+def test_rls_gate_needs_a_positive_status():
+    c = TestApplyTableRls._Client(TestApplyTableRls._GOOD_EXPORT, [{"response": {}}])
+    assert dbt_mod._apply_table_rls(c, TestApplyTableRls._RLS, {})
+
+
+def test_rls_rules_on_join_target_outside_model_path():
+    """PR A review blocker: ts_rls_rules on a joined model outside --model-path."""
+    from ts_cli.dbt.manifest import extract_model_rls_from_manifest
+    manifest = {"nodes": {
+        "model.p.stg_barbers": {"resource_type": "model", "name": "stg_barbers",
+            "original_file_path": "models/marts/core/stg_barbers.sql",
+            "config": {"meta": {"ts_rls_rules": [{"name": "r", "expr": "ts_username = [STG_BARBERS::NAME]"}]}}},
+    }}
+    assert extract_model_rls_from_manifest(manifest, "models/staging/barbershop") == {}
+    got = extract_model_rls_from_manifest(manifest, "models/staging/barbershop", {"STG_BARBERS"})
+    assert list(got) == ["STG_BARBERS"]
+
+
+def test_rls_in_path_model_wins_and_seeds_are_ignored():
+    """Review of the 17.2 fix: an out-of-path node with the same Table name must not
+    replace the in-path model's rules, and a seed never contributes rules."""
+    from ts_cli.dbt.manifest import extract_model_rls_from_manifest
+    rule = lambda n: {"config": {"meta": {"ts_rls_rules": [{"name": n, "expr": "ts_username = [CUSTOMERS::X]"}]}}}
+    manifest = {"nodes": {
+        "model.p.stg": {"resource_type": "model", "name": "stg_customers", "alias": "customers",
+                        "original_file_path": "models/staging/stg_customers.sql", **rule("staging_rule")},
+        "model.p.cust": {"resource_type": "model", "name": "customers",
+                         "original_file_path": "models/marts/customers.sql", **rule("marts_rule")},
+        "seed.p.cust": {"resource_type": "seed", "name": "customers",
+                        "original_file_path": "seeds/customers.csv", **rule("seed_rule")},
+    }}
+    for order in (list(manifest["nodes"].items()), list(reversed(manifest["nodes"].items()))):
+        got = extract_model_rls_from_manifest({"nodes": dict(order)}, "models/marts", {"CUSTOMERS"})
+        assert "marts_rule" in str(got["CUSTOMERS"]), got
+
+
+def test_import_confirmed_rejects_non_dict_items():
+    assert not dbt_mod._import_confirmed(["OK"])
+    assert not dbt_mod._import_confirmed([{"response": {"status": {"status_code": "OK"}}}, "junk"])
+    assert dbt_mod._import_confirmed([{"response": {"status": {"status_code": "OK"}}}])
+
+
+def test_lint_gate_i5_is_advisory(capsys):
+    """I5 on a dbt count_distinct column must not block: the column imports as it
+    did before the gate existed (conversion is audit 2026-10-29 finding 9.2)."""
+    import pytest
+    from ts_cli.dbt.import_gate import lint_gate
+    model = {"model": {"name": "M", "model_tables": [{"name": "T"}], "columns": [
+        {"name": "N", "column_id": "T::C",
+         "properties": {"column_type": "MEASURE", "aggregation": "COUNT_DISTINCT"}}]}}
+    lint_gate(model)
+    assert "advisory" in capsys.readouterr().err
+    model["model"]["guid"] = "nested"   # a blocking finding: guid belongs at the root
+    with pytest.raises(SystemExit):
+        lint_gate(model)
+
+
+
+def test_rls_out_of_path_ignored_when_in_path_model_has_no_rules():
+    """Review of the 17.2 fix: the in-path model wins even when it has no rules."""
+    from ts_cli.dbt.manifest import extract_model_rls_from_manifest
+    manifest = {"nodes": {
+        "model.p.stg": {"resource_type": "model", "name": "stg_customers", "alias": "customers",
+                        "original_file_path": "models/staging/stg_customers.sql"},
+        "model.p.cust": {"resource_type": "model", "name": "customers",
+                         "original_file_path": "models/marts/customers.sql",
+                         "config": {"meta": {"ts_rls_rules": [{"name": "m", "expr": "ts_username = [CUSTOMERS::X]"}]}}},
+    }}
+    for order in (list(manifest["nodes"].items()), list(reversed(manifest["nodes"].items()))):
+        assert extract_model_rls_from_manifest({"nodes": dict(order)}, "models/staging", {"CUSTOMERS"}) == {}
