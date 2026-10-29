@@ -47,7 +47,7 @@ is being tested by the user. Until then Step 3 tells the agent to ask.
 
 **Status: DEFERRED — user testing in progress (2026-09-28).**
 
-## 4 — `COUNT_DISTINCT` on a physical column — DEFERRED
+## 4 — `COUNT_DISTINCT` on a physical column — VERIFIED 2026-10-29
 
 `thoughtspot-model-tml.md` documents that `aggregation: COUNT_DISTINCT` on a `column_id`
 silently turns the column into an ATTRIBUTE. The hand-built HD Org Model carries exactly
@@ -56,7 +56,17 @@ post-import re-export (`coerced`) detects the coercion either way, so a wrong an
 go unreported; what is unknown is whether it happens. Resolve on the first `standard`-mode
 link with a distinct-count metric.
 
-**Status: DEFERRED — detected at run time by the `coerced` check.**
+**Resolved 2026-10-29 by live probe** (the SE demo cluster, throwaway Model over a
+bank-customers Table, re-exported and queried via `searchdata`, then deleted): the
+coercion depends on the column's type. An INT64 column keeps `MEASURE` and returns the
+distinct count; VARCHAR and DATE columns are silently turned into an ATTRIBUTE. That is
+consistent with the `Employee Count` data point above (its type is not recorded). The probe
+used an ordinary Table, not a Table over a semantic object; the result transfers because the
+role is decided from the Table column's `data_type` either way. The link keeps only numeric measures, so its
+`COUNT_DISTINCT` measures are safe and the build no longer warns; the `coerced` check stays.
+Recorded in invariant I5 (`agents/shared/schemas/ts-model-conversion-invariants.md`).
+
+**Status: VERIFIED — live probe 2026-10-29.**
 
 ## 5 — Does `ai/instructions/set` replace or append? — DEFERRED
 

@@ -198,7 +198,7 @@ are roughly ordered by value÷effort.
 | ~~BL-297~~ | ~~27 of 51 ts-audit checks were imported by a test but never CALLED by one~~ | DONE (#530 — every check now has a test that trips it) |
 | BL-298 | the two sharing checks `ts-audit` advertises — S8 "Overly permissive sharing (FULL access to all users)" and S9 "Sharing to external groups" — **are not implemented anywhere**; grepping the audit module for `permission|shared_with|sharing|access_level` returns only those two description strings. The descriptions are corrected so reports stop mislabelling, but a security audit still silently omits sharing entirely | next ts-audit pass |
 | BL-307 | audit 9.1 — `ts-convert-from-looker` instructs `is_hidden: true` on every joined dimension PK (`step-6-model-joins.md:68`, SKILL.md:404, step-6:64/:132, step-5:264, coverage-matrix:36). **I11 says never set it during conversion**, and `thoughtspot-model-tml.md:243` repeats the prohibition. Every joined dimension's PK ships hidden, producing the locked-visualization and join-path failure I11 names. Remove the construct AND add an `is_hidden` rule to `tml_lint.py` under the CANONICAL-RULE-SET marker, which every converter already invokes | next converter pass |
-| BL-308 | audit 9.4 — `sisense/functions.py`'s `translate_agg` has **no live caller** (only a docstring mention), so `sisense-formula-translation.md` specifies a JAQL `agg` → TML `aggregation:` path the emitter never takes. The semantic mapping itself is correct and should NOT be changed (Sisense `count` is a distinct count, `dupcount` the exact total — corrected 2026-08-26, finding 14.3). Two exits needed: wire it or delete it, and if wired, note that `aggregation: COUNT_DISTINCT` on a `column_id`-backed entry silently flips MEASURE to ATTRIBUTE (I5) | next converter pass |
+| BL-308 | audit 9.4 — `sisense/functions.py`'s `translate_agg` has **no live caller** (only a docstring mention), so `sisense-formula-translation.md` specifies a JAQL `agg` → TML `aggregation:` path the emitter never takes. The semantic mapping itself is correct and should NOT be changed (Sisense `count` is a distinct count, `dupcount` the exact total — corrected 2026-08-26, finding 14.3). Two exits needed: wire it or delete it, and if wired, note that `aggregation: COUNT_DISTINCT` on a `column_id`-backed entry silently flips MEASURE to ATTRIBUTE on a non-numeric column (I5) | next converter pass |
 | BL-309 | audit 9.5 — the CoCo `ts-convert-from-snowflake-sv` mirror carries **no I14 rule**: no role-play, alias-node or duplicate-join-pair guidance anywhere. The CLI primary added Step 7.5 plus a reference file at v1.20.0; CoCo has no `ts` CLI and executes the doc, so the rule must be prose there. An SV joining one fact to DIM_TIME on order date and ship date emits two joins on the same ordered pair and **the Model will not load** (observed at 21 joins across 7 pairs on a real customer SV). Also: `check_mirror_sync` collects only each ledger row's path and never compares the recorded CLI version against the actual one, so any SYNC-DEBT row acknowledges its mirror permanently | next mirror pass |
 | BL-310 | audit 9.6 — `model_builder.filter_unresolvable_formulas` computes the drop set to a fixpoint via `_cascade_drop_dependents`, and three sibling skills instruct the executor to do it **by hand, one hop deep**, with the identical sentence (from-qlik:92, from-powerbi:86, from-sisense:78). With C referencing B referencing rejected A, B is dropped and C survives carrying a dangling `[formula_B]` — an I13 violation and a hard 14516 rejection, or a dangling `formula_id` and an I1 silent drop. Expose the retry loop as a shared command or helper the three skills invoke. This is BL-217's remainder and the prior sweep's 11.4 | next converter pass |
 | BL-311 | audit 13.2 — `ts-object-model-coach` open-item #4 defers Data Model Instructions to v1.1 and ships manual copy-paste, but the write API exists: `setNLInstructions` (`POST /api/rest/2.0/ai/instructions/set`, Beta 10.15.0.cl), whose **read twin this repo already calls** at `audit/context.py:145`. Needs a `ts` command, then replace the paste step. Second-order: 26.8.0.cl `ai/memory/export`/`import` (Spotter memory) appears nowhere in `agents/` or `tools/`, so `ts-migrate-orgs` and `ts-publish-orgs` move models between Orgs and silently leave it behind | next ts-cli pass |
@@ -10653,7 +10653,7 @@ must not be broken by the fix.
 
 **Target:** next from-direction converter pass.
 
-## BL-265 — ThoughtSpot demotes a `COUNT` metric over a `VARCHAR` key to an `ATTRIBUTE`, and the converter neither predicts nor reports it `Tier 3`
+## BL-265 — ThoughtSpot demotes any physical measure over a non-numeric column (`COUNT`, `MIN`, `MAX`, `COUNT_DISTINCT`) to an `ATTRIBUTE`, and the converters neither predict nor report it `Tier 3`
 
 **Filed:** 2026-09-08.
 **Source:** the round-trip fidelity study — `docs/reviews/2026-09-08-sv-patterns-roundtrip-fidelity.md`
@@ -10661,7 +10661,9 @@ must not be broken by the fix.
 `.svrt/work/asof_join/` — `tml/`, `classify.json` and the name map
 (**`.svrt/` is gitignored**).
 **Affects:** `tools/ts-cli/ts_cli/sv_naming.py` (`fact_column_type()` and the metric analogue),
-`tools/ts-cli/ts_cli/sv_build_model.py`.
+`tools/ts-cli/ts_cli/sv_build_model.py`, `sv_translate.py:278` (metrics), and — widened
+2026-10-29, audit finding 9.18 — `tools/ts-cli/ts_cli/databricks/mv_translate.py:294-307`, which
+emits e.g. `MAX(transaction_date)` as a physical MEASURE/MAX with no type check.
 **Status:** OPEN.
 
 `asof_join`'s `Orders.order_count AS COUNT(o_ordid)` was built as a `MEASURE`, imported, and
@@ -10682,13 +10684,18 @@ Related but distinct from row 16: that row is about **facts** being typed by dat
 (`fact_column_type()`, live-confirmed and now correct in the matrix). This is the same rule
 applied to a **metric**, where the converter does not anticipate it at all.
 
-**Approach.** Predict the demotion rather than discover it: where a metric's aggregation is
+**Approach (widened 2026-10-29 to MIN/MAX/COUNT and the MV builder).** Predict the demotion rather than discover it: where a metric's aggregation is
 `COUNT`/`COUNT_DISTINCT` over a non-numeric column, either emit it in the form ThoughtSpot will
 keep as a `MEASURE` (a formula counting the key, so the column's own type does not decide), or
 **annotate it** so the operator knows the kind will change on import. Silent kind-change is the
-part worth fixing; the platform behaviour itself is not ours to change. Confirm the exact
+part worth fixing; the platform behaviour itself is not ours to change. ~~Confirm the exact
 trigger first — whether it is `VARCHAR` specifically or any non-numeric type — which is one
-probe on a live Model.
+probe on a live Model.~~ **Trigger confirmed 2026-10-29** (live probe, recorded under
+invariant I5): a `MEASURE` on a VARCHAR column was demoted with `COUNT`, `MIN` and
+`COUNT_DISTINCT`, and on a DATE column with `MAX` and `COUNT_DISTINCT`; INT64 and DOUBLE
+columns kept `MEASURE` with `COUNT_DISTINCT`. So it is not VARCHAR-specific and not
+aggregation-specific — the platform types the column by its data type. BOOL, DATE_TIME and
+TIME were not probed.
 
 **Target:** next from-direction converter pass; fold the type rule in beside
 `fact_column_type()` so facts and metrics share one decision.
@@ -12095,9 +12102,9 @@ part of BL-130. The `ts-link-*` builder should share this map rather than carry 
 **Status: v1 shipped 2026-09-28** — `ts-link-semantic-layer` 1.0.0 + `ts link build`
 (ts-cli 0.150.0). Design changed from the plan below at the user's direction: **no
 per-platform adapters** — one normalized spec and one `--aggregation aggregate|standard`
-switch; re-run preservation parked (BL-318). Remaining: the skill's open items #2–#5
-(Honeydew/Cube/Kyvos metadata, Cube/Kyvos aggregation mode, COUNT_DISTINCT coercion,
-instructions replace-vs-append). The builder carries its own type map (including
+switch; re-run preservation parked (BL-318). Remaining: the skill's open items #2, #3 and #5
+(Honeydew/Cube/Kyvos metadata, Cube/Kyvos aggregation mode, ~~COUNT_DISTINCT coercion~~ —
+#4 verified 2026-10-29 by live probe, instructions replace-vs-append). The builder carries its own type map (including
 `timestamp_ltz`, and the no-scale → INT64 rule shared with `sv_introspect`) rather than
 `mv_tml`'s, because it must reject unknown types where the Snowflake map defaults to VARCHAR —
 a deliberate third map, so BL-130's type audit should cover it. BL-320 no longer blocks linking.

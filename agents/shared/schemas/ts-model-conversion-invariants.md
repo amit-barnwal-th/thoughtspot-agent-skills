@@ -1,4 +1,4 @@
-<!-- currency: thoughtspot — 2026-07 (2026-07-29 full sweep validated I1-I12, N1, PT1, EXC1 against 26.5-26.7 via the SpotterCode MCP; no contradictions found; I13 added and live-verified 2026-07-30 on se-thoughtspot — error_code 14516 on a dangling [formula_*] reference, BL-178/BL-183; I17-I19 added and live-verified 2026-10-21 on se-thoughtspot — join-graph error codes 13123/13124/13125/14565; I20-I21 2026-10-21 — 14528/14504; I22 2026-10-23 — RLS join cycle, from a support case's exported TML) -->
+<!-- currency: thoughtspot — 2026-07 (2026-07-29 full sweep validated I1-I12, N1, PT1, EXC1 against 26.5-26.7 via the SpotterCode MCP; no contradictions found; I13 added and live-verified 2026-07-30 on se-thoughtspot — error_code 14516 on a dangling [formula_*] reference, BL-178/BL-183; I17-I19 added and live-verified 2026-10-21 on se-thoughtspot — join-graph error codes 13123/13124/13125/14565; I20-I21 2026-10-21 — 14528/14504; I22 2026-10-23 — RLS join cycle, from a support case's exported TML; I5 failure mode narrowed by type 2026-10-29, live probes on the SE demo cluster) -->
 
 # ThoughtSpot Model Conversion Invariants
 
@@ -151,11 +151,46 @@ model_tables:
 
 **Rule:** Any distinct-count measure must be expressed as a `formulas[]` entry with
 `unique count ( [TABLE::col] )`. Never use `aggregation: COUNT_DISTINCT` on a `columns[]`
-entry that references a physical column.
+entry that references a physical column, nor on a formula column whose `expr` is just a
+column reference (`[TABLE::col]`) — the probes below show the second fails the same way.
 
-**Failure mode:** Using `aggregation: COUNT_DISTINCT` causes ThoughtSpot to silently
-override `column_type: MEASURE` → `ATTRIBUTE` on that column, making it unsearchable as
-a measure. No import error is raised.
+**Failure mode:** depends on the column's data type, not on the aggregation.
+ThoughtSpot decides a physical column's role from its type: a `MEASURE` over a
+non-numeric column is silently stored as an `ATTRIBUTE`, whatever `aggregation` it
+carries. Live-probed 2026-10-29 on the SE demo cluster (three throwaway Models over a
+bank-customers Table, re-exported, the first also queried via `searchdata`, all deleted):
+
+| Physical column type | Aggregation tested | Stored `column_type` after import | Search returns |
+|---|---|---|---|
+| INT64 | `COUNT_DISTINCT` | `MEASURE` — kept | The distinct count (identical to the `unique count` formula) |
+| DOUBLE | `COUNT_DISTINCT` | `MEASURE` — kept | (not queried) |
+| VARCHAR | `COUNT_DISTINCT`, `COUNT`, `MIN` | `ATTRIBUTE` — **silently overridden** | `COUNT_DISTINCT`: the list of values, no count (others not queried) |
+| DATE | `COUNT_DISTINCT`, `MAX` | `ATTRIBUTE` — **silently overridden** | `COUNT_DISTINCT`: the list of values, no count (`MAX` not queried) |
+| VARCHAR, via a scalar formula `[T::col]` | `COUNT_DISTINCT` on the formula column | `ATTRIBUTE` — **silently overridden** | (not queried; the INT64 twin stayed `MEASURE`) |
+
+Not probed: INT32, FLOAT, BOOL, DATE_TIME, TIME. The formula row matters because `ts tml
+lint` exempts formula columns from I5: a formula that only wraps a column, carrying
+`aggregation: COUNT_DISTINCT`, is the same failure and is not caught today (audit 2026-10-29 finding 9.1, routed to a
+validator). "Numeric" and "non-numeric" below
+generalise from the rows above; BL-265 (a `COUNT` metric over a VARCHAR key, demoted the
+same way) is the same platform rule. Every import succeeds; nothing is reported. Text and
+date keys (string customer ids, order dates) are common distinct-count targets, so the
+silent case is the usual one.
+
+**Why the rule still forbids it on numeric columns.** The formula works for every data
+type, so one emission form needs no type lookup — a converter emitting it never has to
+know the column's type, and `ts tml lint` run on a Model file alone cannot see it either
+(with the Table TML in the same batch it could; that is not implemented). And the column
+form fails outright when the same physical
+column is also wanted as an attribute (`customer_id` as a field *and* a count): two
+`columns[]` entries sharing a `column_id` is a hard `duplicate column_id` rejection (I8).
+Before 2026-10-29 this section said the override applied to every column; that was never
+dated evidence and is wrong for numeric columns.
+
+**Exceptions (not converters):** a round-trip of a Model someone else authored may pass a
+numeric `COUNT_DISTINCT` column through unchanged (`thoughtspot-model-tml.md`), and
+`ts-link-*` emits one by design over numeric measures; `ts tml lint`'s I5 finding is advisory
+in both cases.
 
 **Applies to:** All source dialects.
 - Tableau: `COUNTD(field)` → `unique count ( [TABLE::col] )` formula
@@ -187,7 +222,7 @@ columns:
   column_id: ORDERS::customer_id
   properties:
     column_type: MEASURE
-    aggregation: COUNT_DISTINCT   # WRONG — silently flips to ATTRIBUTE
+    aggregation: COUNT_DISTINCT   # WRONG — flips to ATTRIBUTE on a non-numeric column; use the formula
 ```
 
 ---
