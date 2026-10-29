@@ -45,7 +45,9 @@ def _join_type(item: dict, ctx: Any) -> Optional[str]:
 @register("join_cardinality", uses=(),
           label="the join cardinality")
 def _join_cardinality(item: dict, ctx: Any) -> Optional[str]:
-    """Join: its cardinality upper-cased ("" when unset; inline joins only carry one)."""
+    """Join: its cardinality upper-cased ("" when unset): the model's own, else a
+    referencing join's Table `joins_with` entry, which exported Table TML rarely
+    carries (tml.model_joins)."""
     return _upper((item.get("obj") or {}).get("cardinality"))
 
 
@@ -182,6 +184,19 @@ def _table_set(item: dict, ctx: Any) -> list:
     stays None)."""
     return [t.get("fqn", t.get("name", ""))
             for t in (item.get("obj") or {}).get("model_tables") or []]
+
+
+@register("fact_table_set", uses=(),
+          label="the Model's fact tables")
+def _fact_table_set(item: dict, ctx: Any) -> list:
+    """Model: the identity (as @table_set reads it: `fqn`, else `name`) of each model
+    table that reads as a fact table — more than 3 MEASURE columns, its columns found
+    by its key, alias else name (tml.table_key; not the name-only lookup BL-305
+    records). Formula measures are not counted, as in every audit fact test today."""
+    model = item.get("obj") or {}
+    cols = model.get("columns") or []
+    return [t.get("fqn", t.get("name", "")) for t in model.get("model_tables") or []
+            if tml.table_role(cols, tml.table_key(t)) == "fact"]
 
 
 @register("physical_table_key", uses=(),
