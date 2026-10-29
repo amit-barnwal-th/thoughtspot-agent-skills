@@ -105,6 +105,11 @@ are roughly ordered by value÷effort.
 | ~~BL-350~~ | ~~a text function over a date input returns ISO text; Excel returns the serial; no trap (silent, fidelity M1)~~ | DONE (2026-10-07 — ts-cli v0.161.0) |
 | ~~BL-357~~ | ~~`x / NULLIF(y, 0)` and `COALESCE(x / NULLIF(y, 0), 0)` both collapsed to `safe_divide` — 0 where the source is NULL and NULL where it is 0 (silent, fidelity M2; Snowflake `sv_sql` shares the code)~~ | DONE (2026-10-07 — ts-cli v0.163.0) |
 | ~~BL-359~~ | ~~Databricks `CAST(x AS BIGINT)` → `to_integer`, which compiles to a 32-bit `CAST(… as int)`: 1e12 comes back 2147483647 (silent, fidelity M2)~~ | DONE (2026-10-07 — ts-cli v0.163.0) |
+| BL-447 | I5: Snowflake SV formula-path and Power BI distinct counts demoted to ATTRIBUTE on text/date columns; `check_converter_parity` requirements C (no literal `COUNT_DISTINCT`) and D (lint before import); Tableau merge-mode lint | 2026-11-15 |
+| BL-448 | Renamed pass-through Snowflake SV fact takes the wrong aggregation (sums customer ids where Cortex Analyst counts distinct) | 2026-11-15 |
+| BL-449 | `thoughtspot-chart-types.md` treats the new charts library as phase 1 and defaults to Legacy; live-verify the 26.10 enum, then schema + generator + lint | 2026-11-15 |
+| BL-450 | Snowflake spec carry-overs from 2026-09-22: Complete Schema vs live YAML spec (BL-031's emission spec), five mapping findings, `sample_values` forbidden | 2026-11-15 |
+| BL-451 | Smoke-test ALLOWLIST cites closed or unrelated BL items and `check_smoke_tests` passes | 2026-11-15 |
 
 ### Tier 2 — Schedule soon
 
@@ -116,7 +121,7 @@ are roughly ordered by value÷effort.
 | ~~BL-213~~ | ~~from-Snowflake drops unqualified derived metrics — the only way an SV expresses a cross-fact ratio~~ | DONE (2026-08-06) |
 | ~~BL-214~~ | ~~parse-sv consumes only the first `unique (...)` per table; the rest corrupt the table name~~ | DONE (2026-08-06) |
 | BL-215 | No validator for a custom calendar CSV; the reference file everyone copies is itself wrong in 99% of rows | next client calendar review |
-| BL-217 | Converter helper adoption uneven (pass-throughs, name collisions, I3); nothing detects a converter that skips one | before the next converter |
+| BL-217 | Converter helper adoption uneven (pass-throughs, name collisions, I3); nothing detects a converter that skips one | 2026-12-31 |
 | BL-218 | 3 `--name-status` git call sites still parse quoted paths — same fail-open as BL-217's sibling, needs a status-pairing parser | with the next validator pass |
 | BL-219 | Tableau relationships on any operator but `=` are dropped entirely; the "no range joins" premise is false | next Tableau pass |
 | BL-220 | Gate the hardcoded `thoughtspot-profiles.json` path out of SKILL.md — the enforcement half of BL-084's adoption pass | with BL-084's adoption pass |
@@ -198,11 +203,11 @@ are roughly ordered by value÷effort.
 | ~~BL-297~~ | ~~27 of 51 ts-audit checks were imported by a test but never CALLED by one~~ | DONE (#530 — every check now has a test that trips it) |
 | BL-298 | the two sharing checks `ts-audit` advertises — S8 "Overly permissive sharing (FULL access to all users)" and S9 "Sharing to external groups" — **are not implemented anywhere**; grepping the audit module for `permission|shared_with|sharing|access_level` returns only those two description strings. The descriptions are corrected so reports stop mislabelling, but a security audit still silently omits sharing entirely | next ts-audit pass |
 | BL-307 | audit 9.1 — `ts-convert-from-looker` instructs `is_hidden: true` on every joined dimension PK (`step-6-model-joins.md:68`, SKILL.md:404, step-6:64/:132, step-5:264, coverage-matrix:36). **I11 says never set it during conversion**, and `thoughtspot-model-tml.md:243` repeats the prohibition. Every joined dimension's PK ships hidden, producing the locked-visualization and join-path failure I11 names. Remove the construct AND add an `is_hidden` rule to `tml_lint.py` under the CANONICAL-RULE-SET marker, which every converter already invokes | next converter pass |
-| BL-308 | audit 9.4 — `sisense/functions.py`'s `translate_agg` has **no live caller** (only a docstring mention), so `sisense-formula-translation.md` specifies a JAQL `agg` → TML `aggregation:` path the emitter never takes. The semantic mapping itself is correct and should NOT be changed (Sisense `count` is a distinct count, `dupcount` the exact total — corrected 2026-08-26, finding 14.3). Two exits needed: wire it or delete it, and if wired, note that `aggregation: COUNT_DISTINCT` on a `column_id`-backed entry silently flips MEASURE to ATTRIBUTE on a non-numeric column (I5) | next converter pass |
+| BL-308 | audit 9.4 — `sisense/functions.py`'s `translate_agg` has **no live caller** (only a docstring mention), so `sisense-formula-translation.md` specifies a JAQL `agg` → TML `aggregation:` path the emitter never takes. The semantic mapping itself is correct and should NOT be changed (Sisense `count` is a distinct count, `dupcount` the exact total — corrected 2026-08-26, finding 14.3). Two exits needed: wire it or delete it, and if wired, note that `aggregation: COUNT_DISTINCT` on a `column_id`-backed entry silently flips MEASURE to ATTRIBUTE on a non-numeric column (I5) | 2026-12-31 |
 | BL-309 | audit 9.5 — the CoCo `ts-convert-from-snowflake-sv` mirror carries **no I14 rule**: no role-play, alias-node or duplicate-join-pair guidance anywhere. The CLI primary added Step 7.5 plus a reference file at v1.20.0; CoCo has no `ts` CLI and executes the doc, so the rule must be prose there. An SV joining one fact to DIM_TIME on order date and ship date emits two joins on the same ordered pair and **the Model will not load** (observed at 21 joins across 7 pairs on a real customer SV). Also: `check_mirror_sync` collects only each ledger row's path and never compares the recorded CLI version against the actual one, so any SYNC-DEBT row acknowledges its mirror permanently | next mirror pass |
 | BL-310 | audit 9.6 — `model_builder.filter_unresolvable_formulas` computes the drop set to a fixpoint via `_cascade_drop_dependents`, and three sibling skills instruct the executor to do it **by hand, one hop deep**, with the identical sentence (from-qlik:92, from-powerbi:86, from-sisense:78). With C referencing B referencing rejected A, B is dropped and C survives carrying a dangling `[formula_B]` — an I13 violation and a hard 14516 rejection, or a dangling `formula_id` and an I1 silent drop. Expose the retry loop as a shared command or helper the three skills invoke. This is BL-217's remainder and the prior sweep's 11.4 | next converter pass |
-| BL-311 | audit 13.2 — `ts-object-model-coach` open-item #4 defers Data Model Instructions to v1.1 and ships manual copy-paste, but the write API exists: `setNLInstructions` (`POST /api/rest/2.0/ai/instructions/set`, Beta 10.15.0.cl), whose **read twin this repo already calls** at `audit/context.py:145`. Needs a `ts` command, then replace the paste step. Second-order: 26.8.0.cl `ai/memory/export`/`import` (Spotter memory) appears nowhere in `agents/` or `tools/`, so `ts-migrate-orgs` and `ts-publish-orgs` move models between Orgs and silently leave it behind | next ts-cli pass |
-| BL-312 | audit 6.2 — `ts_cli/powerbi/parsing.py` is 300 statements, **266 missed (11%)**; its test file is 1.8 KB and exercises two private helpers added reactively in a PR review. Every front-door parse path is untested, in the module a whole converter depends on | next testing pass |
+| ~~BL-311~~ | ~~audit 13.2 — `ts-object-model-coach` open-item #4 defers Data Model Instructions to v1.1 and ships manual copy-paste, but the write API exists: `setNLInstructions` (`POST /api/rest/2.0/ai/instructions/set`, Beta 10.15.0.cl), whose **read twin this repo already calls** at `audit/context.py:145`. Needs a `ts` command, then replace the paste step. Second-order: 26.8.0.cl `ai/memory/export`/`import` (Spotter memory) appears nowhere in `agents/` or `tools/`, so `ts-migrate-orgs` and `ts-publish-orgs` move models between Orgs and silently leave it behind~~ | MERGED into BL-030 (2026-10-29, audit finding 5.2) |
+| BL-312 | audit 6.2 — `ts_cli/powerbi/parsing.py` is 300 statements, **266 missed (11%)**; its test file is 1.8 KB and exercises two private helpers added reactively in a PR review. Every front-door parse path is untested, in the module a whole converter depends on | 2026-11-30 (re-dated 2026-10-29, audit finding 6.6) |
 | ~~BL-306~~ | ~~the join checks are blind to the referencing join shape, whose condition lives in the Table TML's `joins_with[]`~~ | DONE (2026-09-24 — live-verified: 4 VARCHAR join keys now reported that two prior runs missed) |
 | ~~BL-299~~ | ~~`index_type` sense inverted in three checks (S2, P9, P11) — presence tested instead of value, so default-indexed PII was invisible and `DONT_INDEX` false-positived~~ | DONE (2026-09-23) |
 | ~~BL-300~~ | ~~`check_p17` cannot fire on any model the audit can see — it matches formula cross-references by display name; real TML refs are `formula_<name>` ids, and a display-name ref fails on first import~~ | DONE (2026-09-23) |
@@ -281,6 +286,35 @@ are roughly ordered by value÷effort.
 | BL-443 | Source row restrictions (data source / report filters) may be dropped unreported in any converter — audit each | after 2026-10-29 audit fixes |
 | BL-444 | Tableau data source filters ignored: the Model returns unfiltered numbers, no warning | after 2026-10-29 audit fixes |
 | BL-445 | Tableau `<relation type='union'>` unhandled — members probably emitted as separate Tables (unverified; fixture first) | after 2026-10-29 audit fixes |
+| BL-452 | `client.py` retries `dbt/dbt-connection` and `dbt/generate-tml` POSTs (duplicate objects); classify every POST path | 2026-11-30 |
+| BL-453 | `ts columns impact` finds Sets by COHORT_* header type and swallows pass errors as found=0 | 2026-11-30 |
+| BL-454 | Extend `tml_lint`: I6 + `db_column_name` (from `mv_tml.py`), I10, I11 with an owner-metadata exception, PT1 warning; Looker PKs hidden | 2026-11-30 |
+| BL-455 | Looker forbids the `fqn:` other converters pin on `model_tables[]` (14502 on same-named Tables) | 2026-11-30 |
+| BL-456 | Snowflake SV metrics emit `aggregation: STDDEV` / `MEDIAN`, not TML values | 2026-11-30 |
+| BL-457 | `check_mapping_currency`: anchor leading date must be at least the newest date in the body | 2026-11-30 |
+| BL-458 | Snowflake constraints attributed to Cortex Analyst unverified under Cortex Agents — live check first | 2026-11-30 |
+| BL-459 | Databricks Metric View Runtime 19: semiadditive default, derived names, window carry-overs (2026-09-22 13.15–13.18), `refresh_policy` | 2026-11-30 |
+| BL-460 | Tableau: unknown functions pass through verbatim and are dropped unreported — generic survivor catch | 2026-11-30 |
+| BL-461 | Audit rule D9 misses `sql_double_aggregate_op` and date variants | 2026-11-30 |
+| BL-462 | Audit rule P18 ignores `unique count` formulas | 2026-11-30 |
+| BL-463 | pip-audit on the oldest and newest matrix legs; Python end-of-life check | 2026-11-30 |
+| BL-464 | `model-routing.md` anchor records a legacy model lineup | 2026-11-30 |
+| BL-465 | Repo no-Haiku rule cites a stale reason — re-derive | 2026-11-30 |
+| BL-466 | `check_harness_routing` matches Haiku pins exactly; add Haiku fixtures | 2026-11-30 |
+| BL-467 | Review/audit agents declare no `effort:`; auditor lists stale invariants | 2026-11-30 |
+| BL-468 | `repo-publisher` still runs the dormant stage sync; re-check its model pin | 2026-11-30 |
+| BL-469 | `ts dbt create/update` token resolver lacks the derived env-var and Keychain-name fallbacks | 2026-11-30 |
+| BL-470 | Keyring fallbacks swallow backend errors as "no credential" | 2026-11-30 |
+| BL-471 | `check_backlog_integrity`: ISO-date targets, index/section status agreement, deleted-id gate; audit-row routing gate | 2026-11-30 |
+| BL-472 | Seven `ts snowflake` subcommands have no CliRunner tests | 2026-11-30 |
+| BL-473 | Angle 17 delta starts at the last commit touching the previous report, not the one adding it | 2026-11-30 |
+| BL-474 | Model-vs-Worksheet predicate written four ways; two skills contradict | 2026-11-30 |
+| BL-475 | to-snowflake-sv hand-rolls Snowflake access; widen `check_patterns` rule 7 | 2026-11-30 |
+| BL-476 | Re-date or close eight overdue OPEN items and six index rows that contradict their RESOLVED sections | 2026-11-30 |
+| BL-265 | Any physical measure over a non-numeric column is demoted to an attribute (`COUNT`/`MIN`/`MAX`/`COUNT_DISTINCT`); SV, MV and dbt converters neither predict nor report it | 2026-11-30 |
+| BL-495 | `ts dbt-export build-model --import` imports without applying `ts_rls_rules` when `--rls-out` is absent | 2026-11-30 |
+| BL-106 | Python 3.11 floor bump: 3.10 is end-of-life and still in `requires-python` and the CI matrix | 2026-11-30 |
+| BL-157 | Aggregates CLI gap: `preview-names`, `widen-rls`, force-add-aware `recommend`, drop the private `ts_cli` imports (event trigger lapsed) | 2026-11-30 |
 
 ### Tier 3 — Opportunistic
 
@@ -315,7 +349,7 @@ are roughly ordered by value÷effort.
 | BL-101 | Chart-axis-role in `ts metadata report` | — |
 | BL-102 | Databricks MV `parameters:` parse + emit | — |
 | BL-111 | `--connection` filter: converter rewiring (remaining) | — |
-| BL-112 | Rewire smoke_ts_audit.py onto `ts audit run/report` | — |
+| BL-112 | Rewire smoke_ts_audit.py onto `ts audit run/report` | 2026-11-30 |
 | BL-116 | Live destructive dependency-manager smoke | — |
 | ~~BL-132~~ | ~~from-Databricks build-model: duplicate `column_id` → formula promotion (I8/I5 parity with from-Snowflake)~~ | DONE (PR #332) |
 | ~~BL-133~~ | ~~`ts metadata delete`: partial-success handling (batch fails atomically if one GUID is missing)~~ | DONE (PR #333, #335) |
@@ -361,6 +395,24 @@ are roughly ordered by value÷effort.
 | BL-441 | No property-based (`hypothesis`) or malformed-input tests on the shared formula output layer | after 2026-10-29 audit fixes |
 | BL-442 | Live-verified vs approximated status of a formula mapping is not carried into the output | after BL-438 |
 | BL-446 | Tableau initial SQL dropped without a report | after 2026-10-29 audit fixes |
+| BL-477 | `ts model dictionary` writes `=`-prefixed descriptions as spreadsheet formulas (CSV and XLSX) | 2026-12-31 |
+| BL-478 | Two forks of the transitive formula-drop cascade; add `formula_common.cascade_drop` | 2026-12-31 |
+| BL-479 | Personalized Liveboard views undocumented; round-trips may drop them | 2026-12-31 |
+| BL-480 | Re-run the ThoughtSpot product-currency lens with SpotterCode authenticated | 2026-12-31 |
+| BL-481 | Databricks citations point at the old `business-semantics/` URL tree | 2026-12-31 |
+| BL-482 | Tableau geospatial census missing PARSE_WKT, NO_CUTOUTS, COLLECT | 2026-12-31 |
+| BL-483 | Tableau coverage matrix still says ISOWEEK/WEEK skipped | 2026-12-31 |
+| BL-484 | `ts columns impact` truncates at 200 dependents / 50 variables silently | 2026-12-31 |
+| BL-485 | from-tableau SKILL.md still offers the always-empty `ts connections get` | 2026-12-31 |
+| BL-486 | from-looker computes viz obj_id instead of reading it back | 2026-12-31 |
+| BL-487 | Raise PyYAML, keyring, websocket-client, openpyxl floors | 2026-12-31 |
+| BL-488 | Evaluate `isolation: worktree` for pr-reviewer | 2026-12-31 |
+| BL-489 | `build-sv --tables-dir` silently skips unparseable JSON | 2026-12-31 |
+| BL-490 | AI-memory RECIPE haystack logic duplicated | 2026-12-31 |
+| BL-491 | AST-based validators pass a file that does not parse | 2026-12-31 |
+| BL-492 | from-dbt column-removal diff uncodified — `ts dbt diff-columns` | 2026-12-31 |
+| BL-493 | `smoke_ts_to_databricks.py` passes with the emitter skipped | 2026-12-31 |
+| BL-494 | `check_ossie_mapping_sync` runs nowhere | 2026-12-31 |
 
 ### Tier 4 — Deferred
 
@@ -377,7 +429,6 @@ are roughly ordered by value÷effort.
 | BL-098 | DBX trailing/leading sparse data (item 3 only) | next DBX live-verify |
 | BL-103 | searchConnection with OAuth hierarchy | next OAuth connection |
 | BL-104 | Evaluate DBX BI compatibility mode | evaluation item |
-| BL-106 | Python 3.11 floor bump (remaining) | after 2026-10 |
 | BL-113 | Live provisioning step for load smoke | next SF live session |
 | BL-114 | Document export_with_column_aliases | GA or skill need |
 | BL-119 | Smoke test for ts-convert-from-sisense | first Sisense bundle |
@@ -1382,6 +1433,8 @@ No converter writes instructions today. Snowflake SV `ai_sql_generation` /
 only in `model.description`. The `ts` command this item adds (overlaps BL-311's
 `setNLInstructions` wrapper — do it once) should be called from both from-converters and
 from `ts-link-semantic-layer`, behind the BL-318 keep/discard check.
+
+**Note (2026-10-29 full audit, `docs/audit/2026-10-29-full.md` finding 5.2) — BL-311 merged in.** `setNLInstructions` is still implemented only as the private `_set_instructions` in `link.py`, and model-coach still ships the manual-paste step while citing an open item this section records as verified. Add a public `ts models instructions get|set` with get-and-merge (the replace-vs-append question above), call it from `ts link` and switch model-coach to it. BL-311 was a duplicate of this item and is closed into it; its second-order point comes with it: `ai/memory/export`/`import` (Spotter memory, 26.8.0.cl) appears nowhere in `agents/` or `tools/`, so `ts-migrate-orgs` and `ts-publish-orgs` leave it behind when they move a Model. The overdue target below is re-dated or closed under BL-476, not here.
 
 **Target:** 2026-09-30.
 
@@ -3336,7 +3389,7 @@ reintroduce the CVEs. urllib3 is covered transitively — no separate pin needed
 
 ---
 
-## BL-106 — Lift the CPython 3.14 cap; plan the 3.11 floor bump `Tier 4`
+## BL-106 — Lift the CPython 3.14 cap; plan the 3.11 floor bump `Tier 2`
 
 **Filed:** 2026-07-11.
 **Source:** 2026-07-11 full audit finding 16.2.
@@ -3349,7 +3402,7 @@ for 3.14 to be testable). **Remaining:** (b) the `>=3.11` floor bump after 3.10 
 `requires-python = ">=3.10,<3.14"` blocked CPython 3.14 (GA Oct 2025). The cap is now lifted and
 3.14 is CI-verified; the floor bump to `>=3.11` remains deferred.
 
-**Target:** ✅ cap lifted; revisit the 3.11 floor bump after 2026-10.
+**Target:** 2026-11-30 for the 3.11 floor bump (re-dated and moved from Tier 4 on 2026-10-29, `docs/audit/2026-10-29-full.md` finding 16.1: 3.10 reached end of life in October 2026 and is still in `requires-python` and the CI matrix). Do: raise the floor to `>=3.11`, drop 3.10 from the matrix, bump ts-cli and add a CHANGELOG entry. The end-of-life check that would have flagged it is BL-463. Was: ✅ cap lifted; revisit the 3.11 floor bump after 2026-10.
 
 **Note (2026-07-29 full audit finding 16.1):** re-confirms the floor bump is already
 tracked here (not a new item) and narrows the plan now that 3.10 EOL (2026-10) is ~2
@@ -3475,7 +3528,7 @@ skill logic") that can silently diverge from the audit's own list (now `PII_PATT
 Point the smoke test at `ts audit run` live; import or delete the duplicated list.
 Parallels the 6.1 dependency-manager smoke-test rewire shipped in PR #212.
 
-**Target:** no fixed date — natural next touch of the audit smoke test.
+**Target:** 2026-11-30 (dated 2026-10-29, `docs/audit/2026-10-29-full.md` finding 6.2: the smoke's PII patterns have since drifted from `audit/engine/fields.py`, it never runs `ts audit run`, and its join step runs no join check; assert on rule ids when rewiring). Was: no fixed date — natural next touch of the audit smoke test.
 
 ---
 
@@ -5026,7 +5079,7 @@ that is a warning to the reader, not a guard in the code.
 `ts_cli` imports (PR #405, extending rule 8 / finding 5.2) -- remove that entry when this
 item ships and the imports are replaced.
 
-**Target:** next `ts-object-model-aggregates` touch -- the audit's own Follow-ups section
+**Target:** 2026-11-30 (dated 2026-10-29, `docs/audit/2026-10-29-full.md` finding 5.1: the event-style trigger "next aggregates touch" fired with #526 on 2026-09-23 and nothing noticed, so the `_TS_CLI_IMPORT_ALLOWLIST` entry had become a permanent exemption). Was: next `ts-object-model-aggregates` touch -- the audit's own Follow-ups section
 names this as the next scoped unit of work once the migrate-engine/harness/mapping wave closed.
 
 ---
@@ -8430,6 +8483,10 @@ handed to a customer, and the failure mode is always the same — the report say
 
 Raised 2026-08-26 from the PR #440 review.
 
+**Note (2026-10-29 full audit, `docs/audit/2026-10-29-full.md` findings 9.10, 9.12, 9.13).** Part 2 is still open. PowerBI skips `resolve_name_collisions` and `fix_double_aggregation`; Qlik skips `resolve_name_collisions` (`model_builder.py:37` imports it and never calls it; the import is a live re-export used by `commands/tableau.py`), so a one-line call closes Qlik's gap (9.10). Three pass-through mechanisms produce two spellings of `sql_*_op`, and only `sql_passthrough_call` guards braces and quotes: converge on one shared emitter (9.12). I3: Tableau, PowerBI, Qlik and Sisense formula MEASURE columns omit `index_type: DONT_INDEX` and no shared helper exists; add one to `formula_common` (the doc example at `ts-from-snowflake-rules.md:575` also omits it) (9.13).
+
+**Target:** 2026-12-31 (dated 2026-10-29; was "before the next converter").
+
 ---
 
 ## BL-218 -- the three `--name-status` call sites still carry the octal-quoting fail-open `Tier 2`
@@ -10663,7 +10720,7 @@ must not be broken by the fix.
 **Affects:** `tools/ts-cli/ts_cli/sv_naming.py` (`fact_column_type()` and the metric analogue),
 `tools/ts-cli/ts_cli/sv_build_model.py`, `sv_translate.py:278` (metrics), and — widened
 2026-10-29, audit finding 9.18 — `tools/ts-cli/ts_cli/databricks/mv_translate.py:294-307`, which
-emits e.g. `MAX(transaction_date)` as a physical MEASURE/MAX with no type check.
+emits e.g. `MAX(transaction_date)` as a physical MEASURE/MAX with no type check. Also the dbt readers (`dbt/tags.py:46`, `dbt/manifest.py`): `ts_aggregation: count|min|max` on a VARCHAR/DATE column is emitted as a physical MEASURE; the manifest builder already reads catalog types, so it can emit `count ( … )` / `max ( … )` formulas or warn (PR A review, 2026-10-29).
 **Status:** OPEN.
 
 `asof_join`'s `Orders.order_count AS COUNT(o_ordid)` was built as a `MEASURE`, imported, and
@@ -10697,7 +10754,7 @@ columns kept `MEASURE` with `COUNT_DISTINCT`. So it is not VARCHAR-specific and 
 aggregation-specific — the platform types the column by its data type. BOOL, DATE_TIME and
 TIME were not probed.
 
-**Target:** next from-direction converter pass; fold the type rule in beside
+**Target:** 2026-11-30 (dated 2026-10-29: it now carries audit finding 9.18; was "next from-direction converter pass"); fold the type rule in beside
 `fact_column_type()` so facts and metrics share one decision.
 
 ## BL-266 — Step 8.5's documented remedy is incompatible with the documented command, so its own predicted artifact ships `Tier 3`
@@ -15077,6 +15134,8 @@ lines (`~ Updating: ...`, the skill list) are printed before the prompt.
 
 **Do.** As spec C3 describes: a meta-check that every gate in `tools/validate/checks.py` (and pr_ready's PR-only/every-PR gates) has a known-bad fixture, with the uncovered ones listed in one dated follow-up; `check_module_health` compares complexity values per function (refactors that move keys pass); `check_file_size` fails a raise against base unless labelled with a cited BL; `pr-ready` warns when a PR edits a gate and product code together.
 
+**Also covers (2026-10-29 full audit, `docs/audit/2026-10-29-full.md` finding 6.4):** three blocking gates have no self-test today — `check_harness_routing`, `generate_parity --check` and `suggest_dependency_types`; the meta-check should list them until they do. The Haiku fixtures for `check_harness_routing` are BL-466.
+
 **Target:** 2026-12-31.
 
 ## BL-428 — spec C4 — run every credential-free smoke suite in CI `Tier 3`
@@ -15084,6 +15143,8 @@ lines (`~ Updating: ...`, the skill list) are printed before the prompt.
 **Filed:** 2026-10-29. **Source:** `docs/superpowers/specs/2026-10-28-pr-quality-system-design.md` §5 C4 (F7); PR #680 moved CI's 7 suites onto `run_checks.py --smokes` but did not add the classification.
 
 **Do.** Add a `CI_RUNNABLE` declaration beside `check_smoke_tests.py`'s `ALLOWLIST`, fail a new smoke that declares neither, feed `CI_SMOKES` from it (keeping `test_checks_parity.py`'s literal as the deliberate second copy), and isolate per-skill caches for credential-free suites. Pairs with BL-422 (two smoke runners).
+
+**Also covers (2026-10-29 full audit, `docs/audit/2026-10-29-full.md` finding 6.3; carry-over of 2026-09-22 finding 7.1):** six suites that need no credentials (four Pure, two CLI-only) run in no CI job, and `test_checks_parity` pins the short list, which locks the gap in. The audit suggested deriving `CI_SMOKES` from the README tiers; the `CI_RUNNABLE` declaration above is the same fix.
 
 **Target:** 2026-12-31.
 
@@ -15267,3 +15328,512 @@ lines (`~ Updating: ...`, the skill list) are printed before the prompt.
 **Do.** Parse initial SQL from each connection and report it as a validation warning naming the statements, so the user can recreate the effect in the warehouse (a view, a role default). Do not attempt to execute or translate it.
 
 **Target:** after the 2026-10-29 audit fixes.
+
+## BL-447 — distinct counts that ThoughtSpot demotes to an attribute: Snowflake SV formula path and Power BI; no gate on the literal `COUNT_DISTINCT` `Tier 1`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, findings 9.1 and 9.4 (and the validator half of 9.3), Codification opportunities 1 and 2. dbt's lint gate (9.3) and 17.1/17.2 are fixed by the dbt correctness PR; the dbt `count_distinct` conversion (9.2) is **here**, because review of that PR showed it needs the design below.
+
+**What.** ThoughtSpot types a physical `MEASURE` by its column's data type (I5 probes, 2026-10-29): a VARCHAR or DATE column with `aggregation: COUNT_DISTINCT` is stored as an `ATTRIBUTE` and search returns values, not a count. from-snowflake-sv emits a fact's `count_distinct` three ways; the computed-fact / `T.COL as col` form is a **formula** column carrying `aggregation: COUNT_DISTINCT` (`sv_translate.py:142` → `sv_build_model.py:60`), which `lint_tml` exempts and the platform demotes the same way — silent. `ts-from-snowflake-rules.md:268` instructs the column form. from-powerbi maps `summarizeBy distinctCount` to a column `COUNT_DISTINCT` (`powerbi/tables.py:26`, `build_model.py:122`); only the prose `ts tml lint` step reports it. Separately, `ts tableau build-model --existing-guid` imports through a `ts tml import` subprocess with no lint (`commands/tableau.py:507-512`), and nothing requires a converter's import path to lint at all.
+
+**Do.** Emit `unique count ( [T::c] )` for every SV fact form and for Power BI `distinctCount` through the shared helper; correct `ts-from-snowflake-rules.md:268`; extend I5's lint to formula columns whose expr is a bare column reference. Add `check_converter_parity` requirement C (no from-converter maps a source aggregation to the literal column `COUNT_DISTINCT`; current hits `sv_naming.py:132`, `powerbi/tables.py:26`, `sisense/functions.py:32` — the last is BL-308's dead code) and requirement D (every `ts-convert-*` builder that imports Model TML, by POST or `ts tml import` subprocess, lints it first — excluding `ts link` and the round-trip commands), and lint Tableau's merge mode.
+
+**dbt (9.2) — design constraints found by two review passes of the attempted fix (2026-10-29).** Converting `ts_aggregation: count_distinct` to a `unique count` formula at build time:
+- must read the **existing Model** on update (`--model-guid`) and keep the form it holds: converting only on create meant a resync replaced the created formula with a physical `COUNT_DISTINCT` column again, and converting on update would replace a round-tripped physical column that Answers use;
+- must not leave a Table with **no `column_id` entry** (ThoughtSpot refuses such a Model): keep the physical column as an attribute under its own name when the count was its only use;
+- must not rewrite a bare-column `ts_formula` **in place** when another formula references it — the per-row value becomes an aggregate; add a separate count formula instead;
+- must leave a declared `ts_column_type: attribute` alone.
+Until then the dbt lint gate reports I5 as advisory, so these columns import as they always did.
+
+**Target:** 2026-11-15.
+
+## BL-448 — a renamed pass-through Snowflake SV fact takes another fact's aggregation `Tier 1`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 9.17 (reproduced offline by the report reviewer).
+
+**What.** `sv_naming.fact_aggregation` (`:162-163`, landed in #557) looks up the Cortex Analyst extension by `(alias_table, alias_name)`, which for a pass-through fact is the physical column (`sv_parse.py:552`); the CA JSON names facts by their declared name (`tests/test_sv_translate.py:1288`). `S.UNIQUE_CUSTOMERS as s.customer_id` with `count_distinct` came out `aggregation: SUM`, exit 0 — ThoughtSpot sums customer ids where Cortex Analyst counts distinct customers — and `S.AVG_COST as s.costs` took the `avg` declared for a different fact. No test covers a renamed pass-through fact.
+
+**Do.** Key the lookup by the declared fact name; add the renamed-fact test (both the count-distinct and the cross-fact cases).
+
+**Target:** 2026-11-15.
+
+## BL-449 — `thoughtspot-chart-types.md` still treats the new charts library as phase 1 and defaults to Legacy `Tier 1`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 13.1 (public release notes only — see 13.3).
+
+**What.** The schema describes the new charts library as phase-1, cartesian + pivot only, and tells generators to default to Legacy. It is GA and the product default since 26.7; 26.10 added waterfall, pareto, funnel and heatmap, and the library also covers donut, scatter and bubble. New limits apply (at most 2 axes, one slice-by-color attribute). `tml_lint.py:54-56` lists 9 `ADVANCED_` types in `_CHART_NEEDS_AXIS` (axis-bearing only), and `tableau/liveboard.py` 8, including `ADVANCED_BUBBLE`, which is not in the schema's enum. This is the original Muze failure again.
+
+**Do.** Live check first: read the chart-type enum from the import validator on a 26.10+ cluster before emitting any new name. Then update the schema, the Tableau liveboard generator and the lint (axis-bearing types only in `_CHART_NEEDS_AXIS`), and resolve `ADVANCED_BUBBLE`.
+
+**Target:** 2026-11-15.
+
+## BL-450 — Snowflake spec carry-overs from the 2026-09-22 sweep: Complete Schema, five mapping findings, `sample_values` `Tier 1`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, findings 13.4, 13.5 (the backlog half) and 13.16; carry-overs of `docs/audit/2026-09-22-full.md` findings 13.7, 13.8, 13.9, 13.10, 13.11, 13.12, 13.13 and 13.14, unrouted for five weeks.
+
+**What.**
+- 13.4 (2026-09-22 13.7): `snowflake-schema.md` Complete Schema still disagrees with the live YAML spec — `onboarding_question` should be `use_as_onboarding_question`; `right_range` is an object; there is no dimension-level `unique`; `tags` is a list of `{name:{database,schema,tag}, value}` objects. BL-031 reads this block as its emission spec.
+- 13.5: READ_YAML vs GET_DDL (2026-09-22 13.8); refresh mode documented as "DDL-only" though `SYSTEM$MANAGE_SEMANTIC_VIEW_MATERIALIZATIONS_FROM_YAML` exists (13.9); bridge traversal documented as "cannot" though the spec has a many-to-many-via-bridge section (13.10); and 2026-09-22 13.11, 13.12, 13.14 as recorded there. All five Snowflake files still lead their currency anchor with `2026-07` while their bodies cite verification dated 2026-08/09.
+- 13.16 (2026-09-22 13.13): `check_sv_yaml.py:45` lists `sample_values` in `FORBIDDEN_FIELDS`; that sweep found it a valid spec key.
+
+**Do.** Correct the Complete Schema block first (BL-031 depends on it). Work each 2026-09-22 finding against the current spec and correct the mapping files; re-verify `sample_values` and either remove it from `FORBIDDEN_FIELDS` or record why it stays. Advance the five anchors when the edits land. The anchor-date validator is BL-457.
+
+**Target:** 2026-11-15.
+
+## BL-451 — the smoke-test ALLOWLIST cites closed or unrelated BL items and the gate passes `Tier 1`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 6.1; carry-over of `docs/audit/2026-09-22-full.md` finding 6.5 (predicted this, never routed).
+
+**What.** `check_smoke_tests.py`'s ALLOWLIST exempts skills by citing BL items, and `_BL_REF_RE` checks only that a BL-shaped string is present. Sisense cites BL-118 (DONE, AgentQL) where the real item is BL-119; Power BI cites BL-076 (no Power BI content, target passed).
+
+**Do.** Resolve each cited BL against `docs/backlog.md`: it must exist, be OPEN, name the skill and carry a future ISO date. Fix the two citations (Power BI may need its own item) and give BL-119 an ISO-date target, or the repointed citation fails the new rule. Known-bad fixtures for each failure.
+
+**Target:** 2026-11-15.
+
+## BL-452 — `client.py` retries two dbt POSTs that create objects `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 17.4.
+
+**What.** `_NON_IDEMPOTENT_PATH_RE` misses `POST dbt/dbt-connection` and `dbt/generate-tml`. Both create objects and default to retries, so a retry can create a duplicate dbt connection or re-run an import.
+
+**Do.** Pass `idempotent=False` on both calls. Add a test that requires every `client.post` path literal under `ts_cli` to be explicitly classified.
+
+**Target:** 2026-11-30.
+
+## BL-453 — `ts columns impact` finds Sets the way BL-325 removed from `ts migrate`, and several passes swallow errors as found=0 `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 17.5.
+
+**What.** PASS 11 finds Sets by COHORT_* header type with a cluster-wide LOGICAL_COLUMN search; BL-325/#554 removed this from `ts migrate` because the header type is blank on most Sets and the search does not finish on large clusters, so the pre-deletion gate under-reports Sets. Passes 5, 7, 8 and 10–13 swallow exceptions and report found=0, which the `impact_probes` contract forbids.
+
+**Do.** Use `sets.discover.discover_sets` and record per-pass `checked` flags. Add a check against COHORT_* header-type matching and cluster-wide LOGICAL_COLUMN searches outside `ts_cli/sets/` — the pattern has now shipped twice. Sequence with BL-394 (the same function's split).
+
+**Target:** 2026-11-30.
+
+## BL-454 — extend `tml_lint`: I6 and `db_column_name`, I10, I11 (with an owner-metadata exception), PT1 warning `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, findings 9.5, 9.7, 9.8, 9.9 and 9.15; Codification opportunity 4.
+
+**What.**
+- 9.5 (I11): from-looker §6f and `references/step-6-model-joins.md` instruct `is_hidden: true` on every dim PK; Looker is mapping-only, so every converted Looker Model ships with its keys hidden.
+- 9.15: I11's wording ("never") contradicts dbt's owner-authored `ts_hidden` tag, which is correct.
+- 9.7 (PT1): Tableau `SIZE()` → `sql_int_aggregate_op` is tiered `row_offset_native` with no review flag; `coverage-matrix.md` claims a PT1 marker and the mapping doc omits it at :947.
+- 9.8: the I6 (`fqn` inside `connection:`) and missing-`db_column_name` checks live privately in `databricks/mv_tml.py:90`; the other five Table-TML emitters are unchecked.
+- 9.9 (I10): Tableau `references/step-5-tml-generation.md:279` example uses `VARCHAR` + `list_config` with no `display_name` (doc only; the CLI is correct).
+
+**Do.** Add the I11 exception for owner-authored visibility metadata to the invariants doc first, then: list Looker dim PKs visible; move the I6 and `db_column_name` checks into `tml_lint` and delete the private copy; add I10 and I11 rules; add a non-fatal PT1 warning on any `sql_*_aggregate_op`; fix the Tableau example and the coverage-matrix/mapping-doc PT1 claims. Update the CANONICAL-RULE-SET marker.
+
+**Target:** 2026-11-30.
+
+## BL-455 — Looker forbids the `fqn:` the other converters pin on `model_tables[]` `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 9.6.
+
+**What.** Looker forbids `fqn:` on `model_tables[]`. SV, Databricks and dbt pin the GUID fqn to avoid error 14502 (duplicate data-source name), so a Looker conversion into an Org with same-named Tables fails import.
+
+**Do.** Align Looker with the other converters. Record the rule once in `thoughtspot-model-tml.md`.
+
+**Target:** 2026-11-30.
+
+## BL-456 — Snowflake SV metrics emit `aggregation: STDDEV` and `MEDIAN`, which are not TML values `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 9.19 (reproduced offline by the report reviewer).
+
+**What.** `sv_resolve.py:422-426` `_SIMPLE_AGG_MAP` puts `STDDEV` and `MEDIAN` on a `column_id` entry. Neither is among the nine documented values (`thoughtspot-model-tml.md:240` spells `STD_DEVIATION` and has no `MEDIAN`). The SV fact path (`sv_naming.py:133`) and Databricks (`mv_translate.py:233`) spell `STD_DEVIATION`. `lint_tml` is clean. Whether import rejects or silently converts these is unverified.
+
+**Do.** Map STDDEV → `STD_DEVIATION` and MEDIAN → a `median ( … )` formula; add an aggregation-enum check to `tml_lint`.
+
+**Target:** 2026-11-30.
+
+## BL-457 — a currency anchor's leading date can predate its own body `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 13.5 (the validator half).
+
+**What.** All five Snowflake mapping/schema files lead with `2026-07` while their bodies cite verification dated 2026-08/09, so `check_mapping_currency` reads them by a date their content has already moved past.
+
+**Do.** In `check_mapping_currency.py`, require an anchor's leading date to be at least the newest ISO date the body cites **as a verification against that platform** (not any date — a ThoughtSpot probe date in a Snowflake file must not inflate the `snowflake` anchor, which scopes the next external sweep) (soft-warn, matching the check's other nudges), with a test.
+
+**Target:** 2026-11-30.
+
+## BL-458 — Snowflake constraints attributed to Cortex Analyst are unverified under Cortex Agents `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 13.6.
+
+**What.** Snowflake recommends moving from Cortex Analyst to Cortex Agents (2026-08-28). The Snowflake mappings and schema name Cortex Analyst about 38 times and Agents zero times. Hard constraints — the lowercase-column blocker, join keys as named dimensions (which drives the wrapper-view rename) — are attributed to Analyst's validator and are unverified under Agents' direct SQL generation.
+
+**Do.** Live check each constraint under Cortex Agents before any edit; then reword the mappings to name whichever surface enforces each one.
+
+**Target:** 2026-11-30.
+
+## BL-459 — Databricks Metric View Runtime 19: semiadditive default, derived names, window carry-overs, refresh_policy `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, findings 13.8, 13.9, 13.10 and 13.12; 13.10 carries `docs/audit/2026-09-22-full.md` findings 13.15, 13.16, 13.17 and 13.18.
+
+**What.**
+- 13.8: `semiadditive` is documented as REQUIRED; on Runtime 19+ it is optional with default `last`. `mv_window.py:89-92` rejects a valid 19+ windowed measure into `unsupported[]` (loud).
+- 13.9: derived names (`name:` omitted) are GA on 19+; the schema says Required and `mv_parse.py:218,242` drops such fields and measures, reporting the loss. Needs the vendor's derivation rule verified first.
+- 13.10: unitless range/offset (19+); the `_VALID_UNITS` plural/week/quarter mismatch; multi-entry windows (period-to-date); no Runtime 19 row in the tier table. All fail loudly.
+- 13.12: `refresh_policy` (1.1, 18 LTS+) and parameter-as-window-size (18.2+) are undocumented; converter impact nil today.
+
+**Do.** Live-verify the semiadditive default and the derived-name rule. Keep the pre-19 facts and add a Runtime 19 row; treat absent `semiadditive` as `last` with a runtime warning (doc and parser together); accept derived names; fix `_VALID_UNITS` and accept unitless and multi-entry windows or report them; document `refresh_policy` and parameter window sizes. Advance the Databricks schema anchor when done.
+
+**Target:** 2026-11-30.
+
+## BL-460 — Tableau functions the converter has never seen pass through verbatim and are dropped unreported `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 13.13; Codification opportunity 5.
+
+**What.** About 20 current Tableau functions are unknown to the converter (CORR, COVAR(P), VAR(P), STDEVP, QUARTER, LOG2, SPACE, LTRIM/RTRIM_THIS, and connector functions such as GET_JSON_OBJECT, PARSE_URL*, XPATH_*, GROUP_CONCAT). They pass through verbatim, fail at import, and are dropped without a MIGRATION_LIMITATIONS entry — the 13.22 failure class. The 2026-08-26 census never diffed the Aggregate, Number, String or Date pages.
+
+**Do.** Add a generic survivor catch in `validate_output`: flag any UPPER_CASE identifier followed by `(` that survives translation. Map VAR/QUARTER/LOG2 only after a live check; never map STDEVP to stddev.
+
+**Target:** 2026-11-30.
+
+## BL-461 — audit rule D9 misses `sql_double_aggregate_op` and the date variants `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 14.1; carry-over of `docs/audit/2026-09-22-full.md` finding 14.2 (BL-406 no longer covers it).
+
+**What.** D9's regex matches only `sql_(int|string|bool)_aggregate_op`, so a Model whose formulas are all double or date pass-throughs gets no finding.
+
+**Do.** Use `sql_[a-z_]+_aggregate_op` (or build the alternation from the patterns schema) in the rule catalog, regenerate, and re-pin.
+
+**Target:** 2026-11-30.
+
+## BL-462 — audit rule P18 will report zero once converters emit `unique count` formulas `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 14.2; carry-over of `docs/audit/2026-09-22-full.md` finding 14.3.
+
+**What.** P18 fires only on `aggregation: COUNT_DISTINCT`. Converters are meant to emit `unique count` formulas (I5), so once BL-447 and the dbt fix land P18 reports zero on any Model this repo generates; today it fires only on the I5 violations.
+
+**Do.** Also scan `formulas[].expr` for `unique count`, `unique_count_if` and `group_unique_count`, in the rule catalog; regenerate and re-pin.
+
+**Target:** 2026-11-30.
+
+## BL-463 — pip-audit covers one Python only, and nothing flags an end-of-life Python in the matrix `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, findings 16.2 and the validator half of 16.1 (the floor bump itself is BL-106).
+
+**What.** pip-audit runs on 3.12 only, so versions resolved on the oldest and newest matrix legs are never audited. 3.10 reached end of life in October 2026 and stayed in `requires-python` and the CI matrix with nothing to say so.
+
+**Do.** Run pip-audit on the oldest and newest matrix legs too. Add a check that fails when `requires-python`'s floor or a CI matrix leg is a CPython version past its end-of-life date (a dated table in the check, itself carrying a currency anchor).
+
+**Target:** 2026-11-30.
+
+## BL-464 — `model-routing.md`'s currency anchor records a legacy model lineup `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 18.1.
+
+**What.** The anchor records the Claude 5 lineup, now legacy (current is 5.1/5.5). The anchor is two months old, so the age nudge stays silent: a recent date on out-of-date content.
+
+**Do.** Re-validate the file's requirements against the current lineup, then bump the anchor.
+
+**Target:** 2026-11-30.
+
+## BL-465 — the repo's no-Haiku rule rests on a reason that is no longer true `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 18.2.
+
+**What.** The no-Haiku rationale cites an effort-dial limitation of an earlier Haiku; the current Haiku supports effort. The rule may still stand on subagent-driven-development policy grounds, but the reason it gives is stale.
+
+**Do.** Re-derive the rule in `.claude/rules/model-routing.md` and state the reason that holds. The matching user-level policy line is out of scope here: it routes to the machine-level setup review, per the report's Follow-ups.
+
+**Target:** 2026-11-30.
+
+## BL-466 — `check_harness_routing` matches Haiku pins exactly, and the gate has no self-test `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, findings 18.3 and 6.4 (the Haiku fixtures); carry-over of `docs/audit/2026-09-22-full.md` finding 6.3. The meta-check half of 6.4 is BL-427.
+
+**What.** `FORBIDDEN_MODEL_PINS = {"haiku"}` is an exact match, so `model: claude-haiku-5-5  # reason: x` passes. The fixture for the known Haiku comment-stripping evasion was not kept.
+
+**Do.** Match any pin value containing `haiku` (case-insensitive). Add known-bad fixtures for the full-id pin and the comment-stripping evasion, and a known-good one.
+
+**Target:** 2026-11-30.
+
+## BL-467 — review and audit agents declare no `effort:` `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 18.4.
+
+**What.** `conversion-consistency-auditor.md` declares no `effort:`, and synthesis and the judgment finders in `repo-audit.js` pass none, so review gates run at the session default against a rule that requires high to max. The auditor's Checks section also still names I1–I7 + N1 against today's I1–I22 + PT1/PT2/EXC1.
+
+**Do.** Add `effort:` to the auditor and per-call effort in `repo-audit.js`; make the auditor discover invariants from the schema headings instead of listing them; add a `check_harness_routing` rule requiring `effort:` on reviewer/auditor agents.
+
+**Target:** 2026-11-30.
+
+## BL-468 — `repo-publisher` still runs the dormant stage sync after merge `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 18.5.
+
+**What.** Step 5 runs `stage-sync.sh` after merge, which the root CLAUDE.md declares dormant; without `.snowflake-deploy-sha` that is a full upload. The agent's `# reason:` pin justification depends on this step.
+
+**Do.** Remove the step or make it opt-in, then re-check whether the model pin is still justified and update or drop its reason.
+
+**Target:** 2026-11-30.
+
+## BL-469 — `ts dbt create/update` use a hand-rolled token resolver that misses the Keychain fallback `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 4.1.
+
+**What.** `commands/dbt.py::_read_access_token` reads the Keychain only when the profile records `keychain_service`/`keychain_account`; it lacks the derived env var and the derived `dbt-cloud-{slug}`/`token` names that `cloud_api.token_from_keychain` falls back to, so `ts dbt create/update` find no credential where `list-models` succeeds.
+
+**Do.** Route it through the shared resolver and move its tests.
+
+**Target:** 2026-11-30.
+
+## BL-470 — keyring fallbacks swallow backend errors as "no credential stored" `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 4.2.
+
+**What.** Four keyring fallbacks use `except Exception: pass`, so a broken backend (no Secret Service, locked keychain) reads as a missing credential and the user gets the wrong remediation.
+
+**Do.** One shared `read_keyring` helper that surfaces the backend error; a `check_patterns` rule against a bare `except` around keyring calls.
+
+**Target:** 2026-11-30.
+
+## BL-471 — backlog and audit routing are ungated: event-style targets, deleted ids, unrouted audit rows `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, findings 5.4 and 7.2, and Codification opportunity 3 (the routing gate). The one-off clean-up 5.4 found is BL-476.
+
+**What.**
+- 5.4: event-style targets ("next X touch") are never checked, so they lapse silently (BL-157, BL-311); the priority index lists items as open whose sections say RESOLVED.
+- 7.2: no gate fails a branch that deletes backlog items present on its base. The 2026-10-29 audit report's own branch silently reverted BL-438..446 (#683) and every check passed. Rule 4 checks only ids a branch introduces; Rule 2 scans citations only in `agents/`, `tools/`, `.github/`.
+- Routing: 19 findings of the 2026-09-22 sweep sat in neither bucket for five weeks; nothing checks that a committed audit report's action rows were routed.
+
+**Do.** In `check_backlog_integrity.py`: require an ISO-date target on OPEN items and warn when one has passed; warn when an index row is open but its section says RESOLVED/DONE; with `--base`, fail when an id owning a section at the merge base is missing at HEAD from both `docs/backlog.md` and `docs/backlog-archive.md`. Add a check that every action row of a committed `docs/audit/*-full.md` is routed — a BL id, PR or accepted-gap note — **in its `docs/audit/<date>-routing.md` companion** (never by editing the report: BL-473), within a set number of days. Land after BL-473. Known-bad fixtures for each.
+
+**Target:** 2026-11-30.
+
+## BL-472 — seven `ts snowflake` subcommands have no CliRunner tests `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 6.5; carry-over of `docs/audit/2026-09-22-full.md` finding 6.4.
+
+**What.** Only `build-model` has CliRunner tests (`tests/test_sv_build_model.py:725-791`, `TestBuildModelCommandTablesAuto`). `diff`, `lint-ddl`, `exec`, `parse-sv`, `translate-formulas`, `introspect` and `build-sv` have none: flag parsing, exit codes and the stdout/stderr split are untested.
+
+**Do.** Extend the pattern in that class to the other seven.
+
+**Target:** 2026-11-30.
+
+## BL-473 — angle 17's delta starts at the last commit that touched the previous report, so it can skip commits `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 7.3.
+
+**What.** `.claude/workflows/repo-audit.js:166` starts the delta at the last commit that *touched* the newest `*-full.md`; the rubric (`repo-audit.md:114`) and `check_audit_freshness.py:141-158` (`--diff-filter=A`) mean the commit that *added* it. After the 2026-08-26 report was edited in place by its routing wave, the 2026-09-22 delta started at #475 and 32 commits fell into no angle-17 review. **Until this lands, never edit a `*-full.md` after it merges:** the 2026-10-29 routing went into a separate `docs/audit/2026-10-29-routing.md` for exactly this reason.
+
+**Do.** Start the delta at the previous report's **recorded delta end**, not at any commit of the report file: "use the adding commit" still skips what merges between a sweep's base and its report landing (#523, 4252da4, fell between the 2026-09-22 and 2026-10-29 deltas this way and its requested targeted review was never recorded; #683 did the same this cycle, docs only). Record the delta end machine-readably in each report; have the workflow and `check_audit_freshness.py` read it through one shared helper, with a validator that they agree. Also route the outstanding targeted review of #523.
+
+**Target:** 2026-11-30.
+
+## BL-474 — the Model-vs-Worksheet predicate is written four ways, and two skills contradict each other `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 11.1.
+
+**What.** answer-promote counts `WORKSHEET_TO_MODEL_UPGRADE` as a Model and the model-coach scan drops it. Skills re-implement the predicate at runtime from prose.
+
+**Do.** One live check to settle the predicate. Then `ts metadata search --models-only` built on `audit.scope.is_model`, the skills switched to it, and a `check_patterns` rule against `contentUpgradeId`/`worksheetVersion` comparisons in SKILL.md.
+
+**Target:** 2026-11-30.
+
+## BL-475 — ts-convert-to-snowflake-sv still hand-rolls Snowflake access; `check_patterns` rule 7 is too narrow to see it `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 11.2.
+
+**What.** Step 7 and the wrapper deploy use a cursor, `connection_factory` and `snow sql` although `ts snowflake exec`/`introspect` cover them. Rule 7 matches only `snowflake.connector.connect(`.
+
+**Do.** Widen rule 7 to `.cursor()`, `cur.execute(`, `connection_factory` and `snow sql`; migrate Step 7 and the wrapper deploy to `ts snowflake exec`.
+
+**Target:** 2026-11-30.
+
+## BL-476 — re-date or close the overdue OPEN items and the index rows that contradict their sections `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, Verdict (overdue targets) and finding 5.4 (index rows). The gate that stops this recurring is BL-471.
+
+**What.** OPEN items past their ISO-date target: BL-030, BL-031, BL-032, BL-071, BL-076, BL-080 and BL-130 (due 2026-09-30) and BL-095 (2026-08-31 per the index; its section has an event-style target). Index rows not struck through although their sections say RESOLVED: BL-178, BL-174, BL-373, BL-193, BL-380, BL-259; also BL-179 (section says both RESOLVED and OPEN) and BL-128 (partial) — check whether either was reopened on purpose.
+
+**Do.** For each of the eight, read the section and either close it (strike the index row, mark the section) or give it a new ISO-date target in both places with a one-line reason; reconcile BL-095's index and section. For each of the six, confirm the resolution and strike the index row. BL-030 also absorbs BL-311 (2026-10-29 audit finding 5.2).
+
+**Target:** 2026-11-30.
+
+## BL-477 — `ts model dictionary` writes descriptions starting with `=` as spreadsheet formulas `Tier 3`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 17.6.
+
+**What.** Descriptions that start with `=` are written as XLSX formulas, and the CSV has the same problem. Ordinary text shows as #NAME?, and crafted metadata is formula injection.
+
+**Do.** Force text cells, or neutralise cells starting with `=`, `+`, `-` or `@`, in both writers; test both.
+
+**Target:** 2026-12-31.
+
+## BL-478 — two forks of the transitive formula-drop cascade, neither in `formula_common` `Tier 3`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 9.11.
+
+**What.** `tableau/reconcile.py:236` walks the cascade with bare refs and `model_builder.py:734` with id refs. Related to, but narrower than, BL-158 / BL-310 (the import-rejection retry loop the qlik/powerbi/sisense skills walk by hand).
+
+**Do.** Add `formula_common.cascade_drop(kept, dropped, ref_form)` and move both callers onto it; BL-158's shared retry loop should then call it.
+
+**Target:** 2026-12-31.
+
+## BL-479 — personalized Liveboard views are undocumented and may be lost in round-trips `Tier 3`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 13.2 (release notes only).
+
+**What.** `thoughtspot-liveboard-tml.md` does not cover personalized views (`author` block, `enable_personalized_view_upsert`). Liveboard round-trips in dependency-manager and migrate-orgs may drop or overwrite them silently.
+
+**Do.** Verify live, then document; check the dependency-manager and migrate-orgs backup/restore paths.
+
+**Target:** 2026-12-31.
+
+## BL-480 — re-run the ThoughtSpot product-currency lens with SpotterCode authenticated `Tier 3`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 13.3.
+
+**What.** The 2026-10-29 ThoughtSpot angle-13 lens ran without the SpotterCode MCP (OAuth an unattended agent could not complete), so it rests on public docs only and several notes pages returned 404. Unverified: "Removal of auto-generated business terms" (26.8) and auto-generated AI Context (EA). Until it is re-run, the ThoughtSpot schemas are unverified against 26.10/26.11.
+
+**Do.** Re-run the lens interactively with SpotterCode authenticated; route what it finds.
+
+**Target:** 2026-12-31.
+
+## BL-481 — Databricks citations still point at the old `business-semantics/` URL tree `Tier 3`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 13.11; carry-over of `docs/audit/2026-09-22-full.md` finding 13.19.
+
+**Do.** Update the links. Optionally a small validator that flags the known-moved prefix.
+
+**Target:** 2026-12-31.
+
+## BL-482 — the Tableau geospatial census is stale: PARSE_WKT, NO_CUTOUTS and COLLECT missing `Tier 3`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 13.14.
+
+**What.** The classifier-pattern block (around :1226 of the Tableau mapping doc — the copy a CoCo reader executes) still says "all 13" and omits PARSE_WKT and NO_CUTOUTS. COLLECT, a spatial-only aggregate, is missing from the "15 spatial functions" census, `_GEO_RE` and `_UNMAPPED_FUNCTIONS`.
+
+**Do.** Add the three and correct the count to 16 in the doc and both code sites.
+
+**Target:** 2026-12-31.
+
+## BL-483 — the Tableau coverage matrix still says ISOWEEK and WEEK are skipped `Tier 3`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 13.15.
+
+**What.** `ts-convert-from-tableau/references/coverage-matrix.md:263` contradicts BL-380.
+
+**Do.** Update the matrix row. (BL-439 would prevent the class.)
+
+**Target:** 2026-12-31.
+
+## BL-484 — `ts columns impact` truncates dependents and formula variables without saying so `Tier 3`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 14.3.
+
+**What.** Dependents are capped at 200 and formula variables at 50 with no pagination, which breaks the ts-cli auto-paginate rule. The to-dbt pre-deletion gate checks only for an empty list, so it still works, but counts are cut short silently.
+
+**Do.** Paginate, or warn on truncation. Sequence with BL-394.
+
+**Target:** 2026-12-31.
+
+## BL-485 — ts-convert-from-tableau still offers `ts connections get`, which it documents as always empty `Tier 3`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 14.4.
+
+**What.** SKILL.md:983 offers it (up to ~16 s on KEY_PAIR for an empty result).
+
+**Do.** Remove it, or point to `ts metadata search --name` filtered on `dataSourceName`.
+
+**Target:** 2026-12-31.
+
+## BL-486 — ts-convert-from-looker computes the viz obj_id instead of reading it back `Tier 3`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 14.5.
+
+**What.** It derives obj_id from a name+GUID formula instead of Tableau's read-back rule; a wrong obj_id fails import with 14500.
+
+**Do.** Adopt the read-back rule.
+
+**Target:** 2026-12-31.
+
+## BL-487 — raise the low dependency floors `Tier 3`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 16.3.
+
+**What.** The floors for PyYAML, keyring, websocket-client and openpyxl are low. No specific CVE was verified against them.
+
+**Do.** Raise each to its current minor, batched with BL-106's floor bump if that lands first.
+
+**Target:** 2026-12-31.
+
+## BL-488 — evaluate `isolation: worktree` for pr-reviewer `Tier 3`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 18.6.
+
+**What.** Newer sub-agent frontmatter options (`isolation: worktree`, `disallowedTools`, `maxTurns`) are unused; pr-reviewer's Bash runs in the shared checkout.
+
+**Do.** Evaluate `isolation: worktree` (and `disallowedTools`) for pr-reviewer; adopt or record why not.
+
+**Target:** 2026-12-31.
+
+## BL-489 — `ts snowflake build-sv --tables-dir` silently skips unparseable JSON `Tier 3`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 4.3.
+
+**Do.** Warn on stderr with the filename, or fail.
+
+**Target:** 2026-12-31.
+
+## BL-490 — the AI-memory RECIPE haystack logic is duplicated `Tier 3`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 4.4.
+
+**What.** `columns.py:395` and `report/impact_probes.py:132` carry the same logic.
+
+**Do.** Import one helper from the other.
+
+**Target:** 2026-12-31.
+
+## BL-491 — AST-based validators read a file that does not parse as PASS `Tier 3`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 4.5. Same fail-open class as BL-421 (missing input), different trigger.
+
+**What.** `check_mapping_code_sync`, `check_internal_imports` and `check_module_health` return empty results on SyntaxError.
+
+**Do.** Treat a parse failure as a finding in each, with a known-bad fixture.
+
+**Target:** 2026-12-31.
+
+## BL-492 — ts-convert-from-dbt's column-removal diff is uncodified and feeds a destructive gate `Tier 3`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 5.3.
+
+**What.** Step 10.3's column-removal diff is executed by the LLM (angle 11b) and feeds the destructive-resync gate.
+
+**Do.** Add `ts dbt diff-columns` and switch Step 10.3 to it.
+
+**Target:** 2026-12-31.
+
+## BL-493 — `smoke_ts_to_databricks.py` passes with the emitter skipped `Tier 3`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 6.7.
+
+**What.** It passes with the emitter skipped when `--target-fqn` is omitted (the default), and it passes empty tables.
+
+**Do.** Make the flag required, or derive a scratch FQN, and feed the table TMLs.
+
+**Target:** 2026-12-31.
+
+## BL-494 — `check_ossie_mapping_sync` runs nowhere `Tier 3`
+
+**Filed:** 2026-10-29. **Source:** `docs/audit/2026-10-29-full.md`, finding 7.1.
+
+**What.** It is listed as a CI check but always skips in CI (no ossie checkout) and is absent from pre-commit.
+
+**Do.** Shallow-clone a pinned ossie-converters ref in CI, or record it as an accepted gap with a date.
+
+**Target:** 2026-12-31.
+
+## BL-495 — `ts dbt-export build-model --import` imports a Model whose Tables' `ts_rls_rules` were never applied `Tier 2`
+
+**Filed:** 2026-10-29. **Source:** the `pr-reviewer` pass on the audit 2026-10-29 dbt fix PR (`fix/dbt-correctness`), sibling of finding 17.2.
+
+**What.** With `ts_rls_rules` in schema.yml and no `--rls-out`, the schema.yml path prints a WARNING (`commands/dbt_export.py`, `_handle_schema_yml_rls`), imports the Model and exits 0, which is the outcome `ts dbt build-model` now treats as fatal. Documented in `ts-convert-from-dbt/SKILL.md`, so not silent, but the two Model builders disagree on what a missing RLS application means.
+
+**Do.** Apply the rules before the Model import as `ts dbt build-model` does (reuse `_apply_table_rls`), or refuse `--import` when rules exist and `--rls-out` is absent. Also align `dbt/inspect.py`'s `rls_models` with build-model, which now applies rules to join targets outside `--model-path` too. And run the cross-file I22 check (`tml_lint.lint_rls_join_cycles`) in `ts dbt build-model` before re-importing the patched Tables: the builder already holds that batch, and applying rules to out-of-path join targets widens the chance of an RLS path closing a join cycle (BACH 12325 at query time after a clean import).
+
+**Target:** 2026-11-30.
+
