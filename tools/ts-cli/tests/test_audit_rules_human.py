@@ -9,6 +9,7 @@ import copy
 import pytest
 
 import audit_rule_fixtures as fx
+from audit_catalog_helpers import PKG_CATALOG
 from ts_cli.audit.catalog_model import build_catalog, load_catalog, load_raw
 from ts_cli.audit.catalog_validate import validate_catalog
 from ts_cli.audit.context import make_context
@@ -100,8 +101,8 @@ def test_model_formula_match_and_name_last_wins():
 
 def test_h_code_rules_declare_what_they_read():
     assert code_rules.SEVERITY_SOURCES["description_quality"] == "severity"
-    assert code_rules.SEVERITY_SOURCES["stale_names"] == frozenset({"MEDIUM", "LOW"})
-    assert code_rules.CODE_USES["stale_names"] == frozenset({"dependents", "sets"})
+    assert code_rules.SEVERITY_SOURCES["stale_names"] == "severity"
+    assert code_rules.CODE_USES["stale_names"] == frozenset()  # @orphan_model declares them
     assert code_rules.PLACEHOLDERS["description_quality"] == {"count", "issues"}
     assert code_rules.PLACEHOLDERS["stale_names"] == {"what", "value"}
     assert not {"description_quality", "stale_names"} & code_rules.OWN_THRESHOLD
@@ -116,7 +117,8 @@ def test_h_code_rules_declare_what_they_read():
     ("this is a column with enough characters.", "'C' uses boilerplate pattern"),
     ("Them apples are counted in this one.", None), ("   ", None), (None, None), (5, None)])
 def test_description_issue(desc, issue):
-    assert code_rules_human.description_issue({"name": "C", "description": desc}) == issue
+    assert code_rules_human.description_issue(
+        {"name": "C", "description": desc}, min_chars=20, max_chars=400) == issue
 
 
 @pytest.mark.parametrize("name,stale", [
@@ -191,3 +193,33 @@ def test_an_active_rule_still_needs_its_logic():
     problems = _shipped_with("H6", lambda r: r.update(status="active"))
     assert any("H6: aggregate.mode is required for a declarative rule" in p
                for p in problems), problems
+
+
+def test_h2_reads_its_parameters_and_an_override_replaces_them():
+    """`parameters` reach the code rule, and a later layer replaces the map whole."""
+    ctx = make_context(models=[fx.build_human_model(columns=[
+        {"name": "A", "description": "x" * 15}, {"name": "B", "description": "y" * 15}])])
+    cat = load_catalog()
+    [base] = run_rule(ctx, cat, "H2", "general")
+    assert base.metric == 2
+    looser = {"H2": {"parameters": {"min_chars": 10, "max_chars": 400, "issues_shown": 1}}}
+    assert run_rule(ctx, cat, "H2", "general", layers=[looser]) == []
+    shown = {"H2": {"parameters": {"min_chars": 20, "max_chars": 400, "issues_shown": 1}}}
+    [one] = run_rule(ctx, cat, "H2", "general", layers=[shown])
+    assert one.metric == 2 and one.detail.count("too short") == 1
+
+
+def test_a_profile_parameters_override_reaches_the_code_rule():
+    """Through the catalog's own profile block, not an extra layer: only the profile
+    that overrides `parameters` changes what H2 flags."""
+    raw = copy.deepcopy(load_raw(PKG_CATALOG))
+    [h2] = [r for f, rules in raw.items() if f.startswith("rules/") for r in rules
+            if r["id"] == "H2"]
+    h2.setdefault("profiles", {})["spotter"] = {
+        "parameters": {"min_chars": 10, "max_chars": 400, "issues_shown": 3}}
+    cat = build_catalog(raw)
+    assert validate_catalog(cat, raw) == []
+    ctx = make_context(models=[fx.build_human_model(columns=[
+        {"name": "A", "description": "x" * 15}])])
+    assert run_rule(ctx, cat, "H2", "spotter") == []
+    assert len(run_rule(ctx, cat, "H2", "general")) == 1
